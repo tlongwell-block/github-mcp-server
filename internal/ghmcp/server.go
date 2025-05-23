@@ -11,7 +11,9 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/github/github-mcp-server/pkg/github"
 	mcplog "github.com/github/github-mcp-server/pkg/log"
 	"github.com/github/github-mcp-server/pkg/translations"
@@ -20,7 +22,163 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 )
+
+// createClient returns an appropriate GitHub client based on available authentication methods.
+// It tries GitHub App authentication first, then falls back to PAT authentication.
+func createClient(cfg MCPServerConfig) (*gogithub.Client, error) {
+	// Try GitHub App authentication first
+	appID := viper.GetInt64("app_id")
+	installationID := viper.GetInt64("installation_id")
+
+	// Check for private key - can be provided as file path or direct content
+	privateKeyPath := viper.GetString("private_key_file_path")
+	privateKeyContent := viper.GetString("private_key")
+
+	// If we have the necessary GitHub App credentials
+	if appID != 0 && installationID != 0 && (privateKeyPath != "" || privateKeyContent != "") {
+		var itr *ghinstallation.Transport
+		var err error
+
+		// Create transport based on how the private key was provided
+		if privateKeyContent != "" {
+			// If private key content was provided directly
+			// The content might be base64 encoded or have escaped newlines
+			privateKeyContent = strings.ReplaceAll(privateKeyContent, "\\n", "\n")
+			itr, err = ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(privateKeyContent))
+		} else {
+			// If private key file path was provided
+			itr, err = ghinstallation.NewKeyFromFile(http.DefaultTransport, appID, installationID, privateKeyPath)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GitHub App transport: %w", err)
+		}
+
+		// Set the base URL if a custom host is specified
+		if cfg.Host != "" {
+			apiHost, err := parseAPIHost(cfg.Host)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse API host: %w", err)
+			}
+			itr.BaseURL = apiHost.baseRESTURL.String()
+		}
+
+		// Create client with the transport
+		client := gogithub.NewClient(&http.Client{Transport: itr})
+		client.UserAgent = fmt.Sprintf("github-mcp-server/%s", cfg.Version)
+
+		return client, nil
+	}
+
+	// Fall back to PAT authentication
+	token := cfg.Token
+	if token == "" {
+		return nil, fmt.Errorf("neither GitHub App credentials nor personal access token provided")
+	}
+
+	// Create client with PAT
+	client := gogithub.NewClient(nil).WithAuthToken(token)
+	client.UserAgent = fmt.Sprintf("github-mcp-server/%s", cfg.Version)
+
+	// Set custom API URL if specified
+	if cfg.Host != "" {
+		apiHost, err := parseAPIHost(cfg.Host)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse API host: %w", err)
+		}
+		client.BaseURL = apiHost.baseRESTURL
+		client.UploadURL = apiHost.uploadURL
+	}
+
+	return client, nil
+}
+
+// createGQLClient returns an appropriate GitHub GraphQL client based on available authentication methods.
+func createGQLClient(cfg MCPServerConfig) (*githubv4.Client, *http.Client, error) {
+	// Try GitHub App authentication first
+	appID := viper.GetInt64("app_id")
+	installationID := viper.GetInt64("installation_id")
+
+	// Check for private key - can be provided as file path or direct content
+	privateKeyPath := viper.GetString("private_key_file_path")
+	privateKeyContent := viper.GetString("private_key")
+
+	// If we have the necessary GitHub App credentials
+	if appID != 0 && installationID != 0 && (privateKeyPath != "" || privateKeyContent != "") {
+		var itr *ghinstallation.Transport
+		var err error
+
+		// Create transport based on how the private key was provided
+		if privateKeyContent != "" {
+			// If private key content was provided directly
+			privateKeyContent = strings.ReplaceAll(privateKeyContent, "\\n", "\n")
+			itr, err = ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(privateKeyContent))
+		} else {
+			// If private key file path was provided
+			itr, err = ghinstallation.NewKeyFromFile(http.DefaultTransport, appID, installationID, privateKeyPath)
+		}
+
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create GitHub App transport: %w", err)
+		}
+
+		// Set the base URL if a custom host is specified
+		if cfg.Host != "" {
+			apiHost, err := parseAPIHost(cfg.Host)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to parse API host: %w", err)
+			}
+			itr.BaseURL = apiHost.baseRESTURL.String()
+		}
+
+		// Create HTTP client with transport
+		httpClient := &http.Client{Transport: itr}
+
+		// Create GraphQL client
+		var gqlClient *githubv4.Client
+		if cfg.Host != "" {
+			apiHost, err := parseAPIHost(cfg.Host)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to parse API host: %w", err)
+			}
+			gqlClient = githubv4.NewEnterpriseClient(apiHost.graphqlURL.String(), httpClient)
+		} else {
+			gqlClient = githubv4.NewClient(httpClient)
+		}
+
+		return gqlClient, httpClient, nil
+	}
+
+	// Fall back to PAT authentication
+	token := cfg.Token
+	if token == "" {
+		return nil, nil, fmt.Errorf("neither GitHub App credentials nor personal access token provided")
+	}
+
+	// Create HTTP client with bearer auth transport
+	httpClient := &http.Client{
+		Transport: &bearerAuthTransport{
+			transport: http.DefaultTransport,
+			token:     token,
+		},
+	}
+
+	// Create GraphQL client
+	var gqlClient *githubv4.Client
+	if cfg.Host != "" {
+		apiHost, err := parseAPIHost(cfg.Host)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse API host: %w", err)
+		}
+		gqlClient = githubv4.NewEnterpriseClient(apiHost.graphqlURL.String(), httpClient)
+	} else {
+		gqlClient = githubv4.NewClient(httpClient)
+	}
+
+	return gqlClient, httpClient, nil
+}
 
 type MCPServerConfig struct {
 	// Version of the server
@@ -48,27 +206,17 @@ type MCPServerConfig struct {
 }
 
 func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
-	apiHost, err := parseAPIHost(cfg.Host)
+	// Create REST client
+	restClient, err := createClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse API host: %w", err)
+		return nil, fmt.Errorf("failed to create GitHub REST client: %w", err)
 	}
 
-	// Construct our REST client
-	restClient := gogithub.NewClient(nil).WithAuthToken(cfg.Token)
-	restClient.UserAgent = fmt.Sprintf("github-mcp-server/%s", cfg.Version)
-	restClient.BaseURL = apiHost.baseRESTURL
-	restClient.UploadURL = apiHost.uploadURL
-
-	// Construct our GraphQL client
-	// We're using NewEnterpriseClient here unconditionally as opposed to NewClient because we already
-	// did the necessary API host parsing so that github.com will return the correct URL anyway.
-	gqlHTTPClient := &http.Client{
-		Transport: &bearerAuthTransport{
-			transport: http.DefaultTransport,
-			token:     cfg.Token,
-		},
-	} // We're going to wrap the Transport later in beforeInit
-	gqlClient := githubv4.NewEnterpriseClient(apiHost.graphqlURL.String(), gqlHTTPClient)
+	// Create GraphQL client
+	gqlClient, gqlHTTPClient, err := createGQLClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GitHub GraphQL client: %w", err)
+	}
 
 	// When a client send an initialize request, update the user agent to include the client info.
 	beforeInit := func(_ context.Context, _ any, message *mcp.InitializeRequest) {
@@ -104,9 +252,9 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 		}
 	}
 
-	getClient := func(_ context.Context) (*gogithub.Client, error) {
-		return restClient, nil // closing over client
-	}
+	// Create repository-aware client factory with 1-hour cache TTL
+	clientFactory := github.NewRepoAwareClientFactory(restClient, 1*time.Hour)
+	getClient := clientFactory.GetClientFn()
 
 	getGQLClient := func(_ context.Context) (*githubv4.Client, error) {
 		return gqlClient, nil // closing over client

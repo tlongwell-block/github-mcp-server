@@ -7,13 +7,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bradleyfalzon/ghinstallation/v2"
 
 	"github.com/github/github-mcp-server/internal/ghmcp"
 	"github.com/github/github-mcp-server/pkg/github"
@@ -29,6 +33,13 @@ var (
 	getTokenOnce sync.Once
 	token        string
 
+	getAppAuthOnce    sync.Once
+	appID             int64
+	installationID    int64
+	privateKeyPath    string
+	privateKeyContent string
+	isAppAuth         bool
+
 	getHostOnce sync.Once
 	host        string
 
@@ -41,10 +52,48 @@ func getE2EToken(t *testing.T) string {
 	getTokenOnce.Do(func() {
 		token = os.Getenv("GITHUB_MCP_SERVER_E2E_TOKEN")
 		if token == "" {
-			t.Fatalf("GITHUB_MCP_SERVER_E2E_TOKEN environment variable is not set")
+			// Check if GitHub App authentication is configured
+			checkAppAuth()
+			if !isAppAuth {
+				t.Fatalf("GITHUB_MCP_SERVER_E2E_TOKEN environment variable is not set and GitHub App authentication is not configured")
+			}
 		}
 	})
 	return token
+}
+
+// checkAppAuth checks if GitHub App authentication is configured
+func checkAppAuth() {
+	getAppAuthOnce.Do(func() {
+		// Check for App ID
+		appIDStr := os.Getenv("GITHUB_MCP_SERVER_E2E_APP_ID")
+		if appIDStr != "" {
+			var err error
+			appID, err = strconv.ParseInt(appIDStr, 10, 64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to parse GITHUB_MCP_SERVER_E2E_APP_ID: %v\n", err)
+				return
+			}
+		}
+
+		// Check for Installation ID
+		installationIDStr := os.Getenv("GITHUB_MCP_SERVER_E2E_INSTALLATION_ID")
+		if installationIDStr != "" {
+			var err error
+			installationID, err = strconv.ParseInt(installationIDStr, 10, 64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to parse GITHUB_MCP_SERVER_E2E_INSTALLATION_ID: %v\n", err)
+				return
+			}
+		}
+
+		// Check for private key path or content
+		privateKeyPath = os.Getenv("GITHUB_MCP_SERVER_E2E_PRIVATE_KEY_PATH")
+		privateKeyContent = os.Getenv("GITHUB_MCP_SERVER_E2E_PRIVATE_KEY")
+
+		// Determine if App Auth is configured
+		isAppAuth = appID != 0 && installationID != 0 && (privateKeyPath != "" || privateKeyContent != "")
+	})
 }
 
 // getE2EHost ensures the environment variable is checked only once and returns the host
@@ -56,12 +105,45 @@ func getE2EHost() string {
 }
 
 func getRESTClient(t *testing.T) *gogithub.Client {
-	// Get token and ensure Docker image is built
-	token := getE2EToken(t)
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
 
-	// Create a new GitHub client with the token
-	ghClient := gogithub.NewClient(nil).WithAuthToken(token)
-	if host := getE2EHost(); host != "https://github.com" {
+	var ghClient *gogithub.Client
+
+	if isAppAuth {
+		// Create a GitHub client with GitHub App authentication
+		var transport http.RoundTripper
+		var err error
+
+		if privateKeyContent != "" {
+			// If private key content was provided directly
+			privateKeyContent = strings.ReplaceAll(privateKeyContent, "\\n", "\n")
+			var itr *ghinstallation.Transport
+			itr, err = ghinstallation.New(http.DefaultTransport, appID, installationID, []byte(privateKeyContent))
+			if err != nil {
+				t.Fatalf("Failed to create GitHub App transport from key content: %v", err)
+			}
+			transport = itr
+		} else {
+			// If private key file path was provided
+			var itr *ghinstallation.Transport
+			itr, err = ghinstallation.NewKeyFromFile(http.DefaultTransport, appID, installationID, privateKeyPath)
+			if err != nil {
+				t.Fatalf("Failed to create GitHub App transport from key file: %v", err)
+			}
+			transport = itr
+		}
+
+		ghClient = gogithub.NewClient(&http.Client{Transport: transport})
+	} else {
+		// Get token for PAT authentication
+		token := getE2EToken(t)
+
+		// Create a new GitHub client with the token
+		ghClient = gogithub.NewClient(nil).WithAuthToken(token)
+	}
+
+	if host := getE2EHost(); host != "" && host != "https://github.com" {
 		var err error
 		// Currently this works for GHEC because the API is exposed at the api subdomain and the path prefix
 		// but it would be preferable to extract the host parsing from the main server logic, and use it here.
@@ -76,12 +158,85 @@ func getRESTClient(t *testing.T) *gogithub.Client {
 func ensureDockerImageBuilt(t *testing.T) {
 	buildOnce.Do(func() {
 		t.Log("Building Docker image for e2e tests...")
-		cmd := exec.Command("docker", "build", "-t", "github/e2e-github-mcp-server", ".")
-		cmd.Dir = ".." // Run this in the context of the root, where the Dockerfile is located.
-		output, err := cmd.CombinedOutput()
-		buildError = err
-		if err != nil {
-			t.Logf("Docker build output: %s", string(output))
+
+		// Check if GitHub App authentication is configured with a private key file
+		checkAppAuth()
+
+		if isAppAuth && privateKeyPath != "" {
+			// Use the e2e Dockerfile that supports private key files
+			// Create the Dockerfile.e2e if it doesn't exist
+			dockerfilePath := "../e2e/Dockerfile.e2e"
+			if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
+				t.Log("Dockerfile.e2e not found, using default Dockerfile")
+				// Use the default Dockerfile
+				cmd := exec.Command("docker", "build", "-t", "github/e2e-github-mcp-server", "..")
+				output, err := cmd.CombinedOutput()
+				buildError = err
+				if err != nil {
+					t.Logf("Docker build output: %s", string(output))
+					return
+				}
+			} else {
+				// Build the Docker image with the e2e Dockerfile
+				cmd := exec.Command("docker", "build", "-f", dockerfilePath, "-t", "github/e2e-github-mcp-server", "..")
+				output, err := cmd.CombinedOutput()
+				buildError = err
+				if err != nil {
+					t.Logf("Docker build output: %s", string(output))
+					return
+				}
+			}
+
+			// If using a private key file, create a Docker container with the private key mounted
+			if privateKeyPath != "" {
+				// Create a temporary container to copy the private key
+				containerID, err := exec.Command("docker", "create", "github/e2e-github-mcp-server").Output()
+				if err != nil {
+					buildError = fmt.Errorf("failed to create temporary container: %w", err)
+					return
+				}
+
+				// Trim the container ID
+				containerIDStr := strings.TrimSpace(string(containerID))
+
+				// Copy the private key to the container
+				copyCmd := exec.Command("docker", "cp", privateKeyPath, fmt.Sprintf("%s:/keys/private-key.pem", containerIDStr))
+				output, err := copyCmd.CombinedOutput()
+				if err != nil {
+					buildError = fmt.Errorf("failed to copy private key: %w", err)
+					t.Logf("Docker cp output: %s", string(output))
+					return
+				}
+
+				// Commit the container as a new image
+				commitCmd := exec.Command("docker", "commit", containerIDStr, "github/e2e-github-mcp-server")
+				output, err = commitCmd.CombinedOutput()
+				if err != nil {
+					buildError = fmt.Errorf("failed to commit container: %w", err)
+					t.Logf("Docker commit output: %s", string(output))
+					return
+				}
+
+				// Remove the temporary container
+				rmCmd := exec.Command("docker", "rm", containerIDStr)
+				output, err = rmCmd.CombinedOutput()
+				if err != nil {
+					t.Logf("Warning: Failed to remove temporary container: %v", err)
+					t.Logf("Docker rm output: %s", string(output))
+					// Don't return an error here, as the container might already be removed
+				}
+
+				// Update the private key path to point to the file inside the container
+				privateKeyPath = "/keys/private-key.pem"
+			}
+		} else {
+			// Use the default Dockerfile
+			cmd := exec.Command("docker", "build", "-t", "github/e2e-github-mcp-server", "..")
+			output, err := cmd.CombinedOutput()
+			buildError = err
+			if err != nil {
+				t.Logf("Docker build output: %s", string(output))
+			}
 		}
 	})
 
@@ -107,9 +262,6 @@ func withToolsets(toolsets []string) clientOption {
 }
 
 func setupMCPClient(t *testing.T, options ...clientOption) *mcpClient.Client {
-	// Get token and ensure Docker image is built
-	token := getE2EToken(t)
-
 	// Create and configure options
 	opts := &clientOpts{}
 
@@ -130,8 +282,25 @@ func setupMCPClient(t *testing.T, options ...clientOption) *mcpClient.Client {
 			"run",
 			"-i",
 			"--rm",
-			"-e",
-			"GITHUB_PERSONAL_ACCESS_TOKEN", // Personal access token is all required
+		}
+
+		// Check if GitHub App authentication is configured
+		checkAppAuth()
+
+		if isAppAuth {
+			// Add GitHub App authentication environment variables
+			args = append(args,
+				"-e", "GITHUB_APP_ID",
+				"-e", "GITHUB_INSTALLATION_ID")
+
+			if privateKeyPath != "" {
+				args = append(args, "-e", "GITHUB_PRIVATE_KEY_FILE_PATH")
+			} else if privateKeyContent != "" {
+				args = append(args, "-e", "GITHUB_PRIVATE_KEY")
+			}
+		} else {
+			// Add PAT authentication environment variable
+			args = append(args, "-e", "GITHUB_PERSONAL_ACCESS_TOKEN")
 		}
 
 		host := getE2EHost()
@@ -148,9 +317,27 @@ func setupMCPClient(t *testing.T, options ...clientOption) *mcpClient.Client {
 		args = append(args, "github/e2e-github-mcp-server")
 
 		// Construct the env vars for the MCP Client to execute docker with
-		dockerEnvVars := []string{
-			fmt.Sprintf("GITHUB_PERSONAL_ACCESS_TOKEN=%s", token),
-			fmt.Sprintf("GITHUB_TOOLSETS=%s", strings.Join(opts.enabledToolsets, ",")),
+		var dockerEnvVars []string
+
+		if isAppAuth {
+			// Add GitHub App authentication environment variables
+			dockerEnvVars = append(dockerEnvVars,
+				fmt.Sprintf("GITHUB_APP_ID=%d", appID),
+				fmt.Sprintf("GITHUB_INSTALLATION_ID=%d", installationID))
+
+			if privateKeyPath != "" {
+				dockerEnvVars = append(dockerEnvVars, fmt.Sprintf("GITHUB_PRIVATE_KEY_FILE_PATH=%s", privateKeyPath))
+			} else if privateKeyContent != "" {
+				dockerEnvVars = append(dockerEnvVars, fmt.Sprintf("GITHUB_PRIVATE_KEY=%s", privateKeyContent))
+			}
+		} else {
+			// Add PAT authentication environment variable
+			token := getE2EToken(t)
+			dockerEnvVars = append(dockerEnvVars, fmt.Sprintf("GITHUB_PERSONAL_ACCESS_TOKEN=%s", token))
+		}
+
+		if len(opts.enabledToolsets) > 0 {
+			dockerEnvVars = append(dockerEnvVars, fmt.Sprintf("GITHUB_TOOLSETS=%s", strings.Join(opts.enabledToolsets, ",")))
 		}
 
 		if host != "" {
@@ -171,12 +358,27 @@ func setupMCPClient(t *testing.T, options ...clientOption) *mcpClient.Client {
 			enabledToolsets = github.DefaultTools
 		}
 
-		ghServer, err := ghmcp.NewMCPServer(ghmcp.MCPServerConfig{
-			Token:           token,
+		// Create the MCP server config
+		serverConfig := ghmcp.MCPServerConfig{
 			EnabledToolsets: enabledToolsets,
 			Host:            getE2EHost(),
 			Translator:      translations.NullTranslationHelper,
-		})
+		}
+
+		// Check if GitHub App authentication is configured
+		checkAppAuth()
+
+		if isAppAuth {
+			// Configure the server to use GitHub App authentication
+			// Note: The server will use the environment variables for GitHub App authentication
+			// We don't need to set the token in the config
+		} else {
+			// Configure the server to use PAT authentication
+			token := getE2EToken(t)
+			serverConfig.Token = token
+		}
+
+		ghServer, err := ghmcp.NewMCPServer(serverConfig)
 		require.NoError(t, err, "expected to construct MCP server successfully")
 
 		t.Log("Starting In Process MCP client...")
@@ -208,6 +410,14 @@ func setupMCPClient(t *testing.T, options ...clientOption) *mcpClient.Client {
 
 func TestGetMe(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestGetMe for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 
@@ -271,6 +481,14 @@ func TestToolsets(t *testing.T) {
 
 func TestTags(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestTags for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 
@@ -409,6 +627,14 @@ func TestTags(t *testing.T) {
 
 func TestFileDeletion(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestFileDeletion for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 
@@ -601,6 +827,14 @@ func TestFileDeletion(t *testing.T) {
 
 func TestDirectoryDeletion(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestDirectoryDeletion for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 
@@ -801,6 +1035,14 @@ func TestRequestCopilotReview(t *testing.T) {
 
 	t.Parallel()
 
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestRequestCopilotReview for GitHub App authentication - requires user:email scope")
+	}
+
 	mcpClient := setupMCPClient(t)
 
 	ctx := context.Background()
@@ -932,7 +1174,7 @@ func TestRequestCopilotReview(t *testing.T) {
 
 	// Finally, get requested reviews and see copilot is in there
 	// MCP Server doesn't support requesting reviews yet, but we can use the GitHub Client
-	ghClient := gogithub.NewClient(nil).WithAuthToken(getE2EToken(t))
+	ghClient := getRESTClient(t)
 	t.Logf("Getting reviews for pull request in %s/%s...", currentOwner, repoName)
 	reviewRequests, _, err := ghClient.PullRequests.ListReviewers(context.Background(), currentOwner, repoName, 1, nil)
 	require.NoError(t, err, "expected to get review requests successfully")
@@ -945,6 +1187,14 @@ func TestRequestCopilotReview(t *testing.T) {
 
 func TestPullRequestAtomicCreateAndSubmit(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestPullRequestAtomicCreateAndSubmit for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 
@@ -1105,6 +1355,14 @@ func TestPullRequestAtomicCreateAndSubmit(t *testing.T) {
 
 func TestPullRequestReviewCommentSubmit(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestPullRequestReviewCommentSubmit for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 
@@ -1350,6 +1608,14 @@ func TestPullRequestReviewCommentSubmit(t *testing.T) {
 
 func TestPullRequestReviewDeletion(t *testing.T) {
 	t.Parallel()
+
+	// Check if GitHub App authentication is configured
+	checkAppAuth()
+
+	// Skip this test if using GitHub App authentication since it doesn't have user permissions
+	if isAppAuth {
+		t.Skip("Skipping TestPullRequestReviewDeletion for GitHub App authentication - requires user:email scope")
+	}
 
 	mcpClient := setupMCPClient(t)
 

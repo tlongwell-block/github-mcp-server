@@ -1,8 +1,9 @@
 module github.com/github/github-mcp-server
 
-go 1.23.7
+go 1.23.4
 
 require (
+	github.com/bradleyfalzon/ghinstallation/v2 v2.9.0
 	github.com/google/go-github/v69 v69.2.0
 	github.com/mark3labs/mcp-go v0.28.0
 	github.com/migueleliasweb/go-github-mock v1.3.0
@@ -10,6 +11,11 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.10.0
+)
+
+require (
+	github.com/golang-jwt/jwt/v4 v4.5.0 // indirect
+	github.com/google/go-github/v57 v57.0.0 // indirect
 )
 
 require (

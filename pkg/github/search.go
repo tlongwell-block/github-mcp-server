@@ -36,6 +36,14 @@ func SearchRepositories(getClient GetClientFn, t translations.TranslationHelperF
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
+			// Extract repository info if present in the query
+			// This is a simple heuristic to check if the query contains a specific repository
+			// Format could be "repo:owner/repo" or similar
+			repoQuery := extractRepoFromQuery(query)
+			if repoQuery.owner != "" && repoQuery.repo != "" {
+				ctx = WithRepoContext(ctx, repoQuery.owner, repoQuery.repo)
+			}
+
 			opts := &github.SearchOptions{
 				ListOptions: github.ListOptions{
 					Page:    pagination.page,
@@ -107,6 +115,12 @@ func SearchCode(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 			pagination, err := OptionalPaginationParams(request)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
+			}
+
+			// Extract repository info if present in the query
+			repoQuery := extractRepoFromQuery(query)
+			if repoQuery.owner != "" && repoQuery.repo != "" {
+				ctx = WithRepoContext(ctx, repoQuery.owner, repoQuery.repo)
 			}
 
 			opts := &github.SearchOptions{
