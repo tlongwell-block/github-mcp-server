@@ -190,6 +190,9 @@ func ListBranches(getClient GetClientFn, t translations.TranslationHelperFunc) (
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
+			// Add repository info to context for client selection
+			ctx = WithRepoContext(ctx, owner, repo)
+
 			opts := &github.BranchListOptions{
 				ListOptions: github.ListOptions{
 					Page:    pagination.page,
@@ -449,6 +452,9 @@ func GetFileContents(getClient GetClientFn, t translations.TranslationHelperFunc
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+
+			// Add repository info to context for client selection
+			ctx = WithRepoContext(ctx, owner, repo)
 
 			client, err := getClient(ctx)
 			if err != nil {

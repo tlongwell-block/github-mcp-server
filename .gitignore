@@ -1,5 +1,8 @@
 .idea
 cmd/github-mcp-server/github-mcp-server
+github-mcp-server
+test-client
+cmd/test-client/test-client
 
 # VSCode
 .vscode/*

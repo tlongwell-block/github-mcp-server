@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/github/github-mcp-server/pkg/github"
@@ -251,9 +252,9 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 		}
 	}
 
-	getClient := func(_ context.Context) (*gogithub.Client, error) {
-		return restClient, nil // closing over client
-	}
+	// Create repository-aware client factory with 1-hour cache TTL
+	clientFactory := github.NewRepoAwareClientFactory(restClient, 1*time.Hour)
+	getClient := clientFactory.GetClientFn()
 
 	getGQLClient := func(_ context.Context) (*githubv4.Client, error) {
 		return gqlClient, nil // closing over client

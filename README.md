@@ -16,8 +16,70 @@ automation and interaction capabilities for developers and tools.
 
 1. To run the server in a container, you will need to have [Docker](https://www.docker.com/) installed.
 2. Once Docker is installed, you will also need to ensure Docker is running. The image is public; if you get errors on pull, you may have an expired token and need to `docker logout ghcr.io`.
-3. Lastly you will need to [Create a GitHub Personal Access Token](https://github.com/settings/personal-access-tokens/new).
-The MCP server can use many of the GitHub APIs, so enable the permissions that you feel comfortable granting your AI tools (to learn more about access tokens, please check out the [documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)).
+3. For authentication, you have two options:
+   - **Personal Access Token (PAT)**: [Create a GitHub Personal Access Token](https://github.com/settings/personal-access-tokens/new). Enable the permissions that you feel comfortable granting your AI tools.
+   - **GitHub App Authentication**: Use a GitHub App's credentials for authentication. This requires an App ID, Installation ID, and private key.
+
+## Authentication
+
+The GitHub MCP Server supports two authentication methods:
+
+### Personal Access Token (PAT)
+
+You can authenticate using a GitHub Personal Access Token by setting the `GITHUB_PERSONAL_ACCESS_TOKEN` environment variable:
+
+```bash
+docker run -i --rm \
+  -e GITHUB_PERSONAL_ACCESS_TOKEN=<your-token> \
+  ghcr.io/github/github-mcp-server
+```
+
+### GitHub App Authentication
+
+Alternatively, you can authenticate using GitHub App credentials. This requires:
+
+1. **App ID**: The GitHub App's ID
+2. **Installation ID**: The ID of the app installation
+3. **Private Key**: The app's private key (as a file path or direct content)
+
+You can provide these credentials in two ways:
+
+#### Using a Private Key File
+
+```bash
+docker run -i --rm \
+  -e GITHUB_APP_ID=<app-id> \
+  -e GITHUB_INSTALLATION_ID=<installation-id> \
+  -e GITHUB_PRIVATE_KEY_FILE_PATH=/path/to/private-key.pem \
+  -v /local/path/to/private-key.pem:/path/to/private-key.pem \
+  ghcr.io/github/github-mcp-server
+```
+
+#### Using Private Key Content Directly
+
+```bash
+docker run -i --rm \
+  -e GITHUB_APP_ID=<app-id> \
+  -e GITHUB_INSTALLATION_ID=<installation-id> \
+  -e GITHUB_PRIVATE_KEY="$(cat /path/to/private-key.pem)" \
+  ghcr.io/github/github-mcp-server
+```
+
+**Note**: GitHub App authentication tokens are automatically refreshed before they expire.
+
+### Public Repository Access with GitHub App Authentication
+
+By default, GitHub Apps can only access repositories they are explicitly installed on. However, the GitHub MCP Server includes a feature that allows you to access public repositories even when using GitHub App authentication:
+
+- When accessing a repository, the server first attempts to use the GitHub App credentials
+- If that fails with a permission error (e.g., the app isn't installed on the repository), the server automatically falls back to anonymous access for public repositories
+- This happens transparently without any additional configuration
+
+This feature enables your AI tools to access both:
+- Private repositories where the GitHub App is installed
+- Public repositories across GitHub, even if the app is not installed on them
+
+The server intelligently caches repository access information to minimize API calls and maintain optimal performance.
 
 ## Installation
 
@@ -25,7 +87,9 @@ The MCP server can use many of the GitHub APIs, so enable the permissions that y
 
 For quick installation, use one of the one-click install buttons at the top of this README. Once you complete that flow, toggle Agent mode (located by the Copilot Chat text input) and the server will start.
 
-For manual installation, add the following JSON block to your User Settings (JSON) file in VS Code. You can do this by pressing `Ctrl + Shift + P` and typing `Preferences: Open User Settings (JSON)`.
+For manual installation, add one of the following JSON blocks to your User Settings (JSON) file in VS Code. You can do this by pressing `Ctrl + Shift + P` and typing `Preferences: Open User Settings (JSON)`.
+
+#### Using Personal Access Token (PAT)
 
 ```json
 {
@@ -58,8 +122,60 @@ For manual installation, add the following JSON block to your User Settings (JSO
 }
 ```
 
-Optionally, you can add a similar example (i.e. without the mcp key) to a file called `.vscode/mcp.json` in your workspace. This will allow you to share the configuration with others.
+#### Using GitHub App Authentication
 
+```json
+{
+  "mcp": {
+    "inputs": [
+      {
+        "type": "promptString",
+        "id": "github_app_id",
+        "description": "GitHub App ID",
+        "password": false
+      },
+      {
+        "type": "promptString",
+        "id": "github_installation_id",
+        "description": "GitHub App Installation ID",
+        "password": false
+      },
+      {
+        "type": "promptString",
+        "id": "github_private_key",
+        "description": "GitHub App Private Key",
+        "password": true
+      }
+    ],
+    "servers": {
+      "github": {
+        "command": "docker",
+        "args": [
+          "run",
+          "-i",
+          "--rm",
+          "-e",
+          "GITHUB_APP_ID",
+          "-e",
+          "GITHUB_INSTALLATION_ID",
+          "-e",
+          "GITHUB_PRIVATE_KEY",
+          "ghcr.io/github/github-mcp-server"
+        ],
+        "env": {
+          "GITHUB_APP_ID": "${input:github_app_id}",
+          "GITHUB_INSTALLATION_ID": "${input:github_installation_id}",
+          "GITHUB_PRIVATE_KEY": "${input:github_private_key}"
+        }
+      }
+    }
+  }
+}
+```
+
+Optionally, you can add a similar example (i.e. without the mcp key) to a file called `.vscode/mcp.json` in your workspace. This will allow you to share the configuration with others. Here are examples for both authentication methods:
+
+#### Workspace Configuration with PAT
 
 ```json
 {
@@ -88,12 +204,59 @@ Optionally, you can add a similar example (i.e. without the mcp key) to a file c
     }
   }
 }
-
 ```
 
-More about using MCP server tools in VS Code's [agent mode documentation](https://code.visualstudio.com/docs/copilot/chat/mcp-servers).
+#### Workspace Configuration with GitHub App Authentication
+
+```json
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "github_app_id",
+      "description": "GitHub App ID",
+      "password": false
+    },
+    {
+      "type": "promptString",
+      "id": "github_installation_id",
+      "description": "GitHub App Installation ID",
+      "password": false
+    },
+    {
+      "type": "promptString",
+      "id": "github_private_key",
+      "description": "GitHub App Private Key",
+      "password": true
+    }
+  ],
+  "servers": {
+    "github": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_APP_ID",
+        "-e",
+        "GITHUB_INSTALLATION_ID",
+        "-e",
+        "GITHUB_PRIVATE_KEY",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_APP_ID": "${input:github_app_id}",
+        "GITHUB_INSTALLATION_ID": "${input:github_installation_id}",
+        "GITHUB_PRIVATE_KEY": "${input:github_private_key}"
+      }
+    }
+  }
+}
 
 ### Usage with Claude Desktop
+
+#### Using Personal Access Token (PAT)
 
 ```json
 {
@@ -116,10 +279,41 @@ More about using MCP server tools in VS Code's [agent mode documentation](https:
 }
 ```
 
+#### Using GitHub App Authentication
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_APP_ID",
+        "-e",
+        "GITHUB_INSTALLATION_ID",
+        "-e",
+        "GITHUB_PRIVATE_KEY",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_APP_ID": "<YOUR_APP_ID>",
+        "GITHUB_INSTALLATION_ID": "<YOUR_INSTALLATION_ID>",
+        "GITHUB_PRIVATE_KEY": "<YOUR_PRIVATE_KEY>"
+      }
+    }
+  }
+}
+```
+
 ### Build from source
 
 If you don't have Docker, you can use `go build` to build the binary in the
-`cmd/github-mcp-server` directory, and use the `github-mcp-server stdio` command with the `GITHUB_PERSONAL_ACCESS_TOKEN` environment variable set to your token. To specify the output location of the build, use the `-o` flag. You should configure your server to use the built executable as its `command`. For example:
+`cmd/github-mcp-server` directory, and use the `github-mcp-server stdio` command with the appropriate authentication environment variables. To specify the output location of the build, use the `-o` flag. You should configure your server to use the built executable as its `command`. For example:
+
+#### Using Personal Access Token (PAT)
 
 ```JSON
 {
@@ -130,6 +324,26 @@ If you don't have Docker, you can use `go build` to build the binary in the
         "args": ["stdio"],
         "env": {
           "GITHUB_PERSONAL_ACCESS_TOKEN": "<YOUR_TOKEN>"
+        }
+      }
+    }
+  }
+}
+```
+
+#### Using GitHub App Authentication
+
+```JSON
+{
+  "mcp": {
+    "servers": {
+      "github": {
+        "command": "/path/to/github-mcp-server",
+        "args": ["stdio"],
+        "env": {
+          "GITHUB_APP_ID": "<YOUR_APP_ID>",
+          "GITHUB_INSTALLATION_ID": "<YOUR_INSTALLATION_ID>",
+          "GITHUB_PRIVATE_KEY": "<YOUR_PRIVATE_KEY>"
         }
       }
     }
@@ -175,9 +389,22 @@ The environment variable `GITHUB_TOOLSETS` takes precedence over the command lin
 
 When using Docker, you can pass the toolsets as environment variables:
 
+#### With Personal Access Token (PAT)
+
 ```bash
 docker run -i --rm \
   -e GITHUB_PERSONAL_ACCESS_TOKEN=<your-token> \
+  -e GITHUB_TOOLSETS="repos,issues,pull_requests,code_security,experiments" \
+  ghcr.io/github/github-mcp-server
+```
+
+#### With GitHub App Authentication
+
+```bash
+docker run -i --rm \
+  -e GITHUB_APP_ID=<app-id> \
+  -e GITHUB_INSTALLATION_ID=<installation-id> \
+  -e GITHUB_PRIVATE_KEY="$(cat /path/to/private-key.pem)" \
   -e GITHUB_TOOLSETS="repos,issues,pull_requests,code_security,experiments" \
   ghcr.io/github/github-mcp-server
 ```
@@ -212,9 +439,22 @@ When using the binary, you can pass the `--dynamic-toolsets` flag.
 
 When using Docker, you can pass the toolsets as environment variables:
 
+#### With Personal Access Token (PAT)
+
 ```bash
 docker run -i --rm \
   -e GITHUB_PERSONAL_ACCESS_TOKEN=<your-token> \
+  -e GITHUB_DYNAMIC_TOOLSETS=1 \
+  ghcr.io/github/github-mcp-server
+```
+
+#### With GitHub App Authentication
+
+```bash
+docker run -i --rm \
+  -e GITHUB_APP_ID=<app-id> \
+  -e GITHUB_INSTALLATION_ID=<installation-id> \
+  -e GITHUB_PRIVATE_KEY="$(cat /path/to/private-key.pem)" \
   -e GITHUB_DYNAMIC_TOOLSETS=1 \
   ghcr.io/github/github-mcp-server
 ```
@@ -225,7 +465,9 @@ The flag `--gh-host` and the environment variable `GITHUB_HOST` can be used to s
 the GitHub Enterprise Server hostname.
 Prefix the hostname with the `https://` URI scheme, as it otherwise defaults to `http://` which GitHub Enterprise Server does not support.
 
-``` json
+### With Personal Access Token (PAT)
+
+```json
 "github": {
     "command": "docker",
     "args": [
@@ -240,6 +482,34 @@ Prefix the hostname with the `https://` URI scheme, as it otherwise defaults to 
     ],
     "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "${input:github_token}",
+        "GITHUB_HOST": "https://<your GHES domain name>"
+    }
+}
+```
+
+### With GitHub App Authentication
+
+```json
+"github": {
+    "command": "docker",
+    "args": [
+    "run",
+    "-i",
+    "--rm",
+    "-e",
+    "GITHUB_APP_ID",
+    "-e",
+    "GITHUB_INSTALLATION_ID",
+    "-e",
+    "GITHUB_PRIVATE_KEY",
+    "-e",
+    "GITHUB_HOST",
+    "ghcr.io/github/github-mcp-server"
+    ],
+    "env": {
+        "GITHUB_APP_ID": "${input:github_app_id}",
+        "GITHUB_INSTALLATION_ID": "${input:github_installation_id}",
+        "GITHUB_PRIVATE_KEY": "${input:github_private_key}",
         "GITHUB_HOST": "https://<your GHES domain name>"
     }
 }

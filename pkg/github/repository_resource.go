@@ -79,6 +79,9 @@ func RepositoryResourceContentsHandler(getClient GetClientFn) func(ctx context.C
 		}
 		repo := r[0]
 
+		// Add repository info to context for client selection
+		ctx = WithRepoContext(ctx, owner, repo)
+
 		// path should be a joined list of the path parts
 		path := ""
 		p, ok := request.Params.Arguments["path"].([]string)
