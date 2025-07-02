@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/github/github-mcp-server/pkg/toolsets"
 	"github.com/github/github-mcp-server/pkg/translations"
@@ -16,6 +17,16 @@ type GetGQLClientFn func(context.Context) (*githubv4.Client, error)
 var DefaultTools = []string{"all"}
 
 func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
+	// Parse toolset configurations from the passed toolsets
+	configs, err := toolsets.ParseToolsetConfigFromSlice(passedToolsets)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse toolset configuration: %w", err)
+	}
+
+	return InitToolsetsWithConfig(configs, readOnly, getClient, getGQLClient, t)
+}
+
+func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
 	// Create a new toolset group
 	tsg := toolsets.NewToolsetGroup(readOnly)
 
@@ -101,9 +112,9 @@ func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn,
 	tsg.AddToolset(codeSecurity)
 	tsg.AddToolset(secretProtection)
 	tsg.AddToolset(experiments)
-	// Enable the requested features
 
-	if err := tsg.EnableToolsets(passedToolsets); err != nil {
+	// Enable the requested toolsets with their configurations
+	if err := tsg.EnableToolsetsWithConfig(configs); err != nil {
 		return nil, err
 	}
 
