@@ -50,6 +50,7 @@ func TestInitToolsetsWithConfig(t *testing.T) {
 				"code_security":     toolsets.ReadOnly,
 				"secret_protection": toolsets.ReadOnly,
 				"experiments":       toolsets.ReadOnly,
+				"context":           toolsets.ReadOnly,
 			},
 		},
 		{
@@ -151,7 +152,7 @@ func TestInitToolsets_BackwardCompatibility(t *testing.T) {
 			passedToolsets:  []string{"all"},
 			readOnly:        false,
 			wantErr:         false,
-			expectedEnabled: []string{"repos", "issues", "users", "pull_requests", "code_security", "secret_protection", "experiments"},
+			expectedEnabled: []string{"repos", "issues", "users", "pull_requests", "code_security", "secret_protection", "experiments", "context"},
 		},
 		{
 			name:            "new format - mixed modes",
@@ -316,4 +317,65 @@ func TestToolsetModeFiltering(t *testing.T) {
 				tt.toolsetName, toolset.Mode, readToolCount, writeToolCount, len(activeTools), len(availableTools))
 		})
 	}
+}
+
+func TestContextToolsetIntegration(t *testing.T) {
+	// Mock translation function
+	mockTranslator := func(key, fallback string) string {
+		return fallback
+	}
+
+	// Mock client functions
+	getClient := func(ctx context.Context) (*github.Client, error) {
+		return nil, nil
+	}
+	getGQLClient := func(ctx context.Context) (*githubv4.Client, error) {
+		return nil, nil
+	}
+
+	// Test that context toolset can be configured
+	configs := []toolsets.ToolsetConfig{
+		{Name: "context", Mode: toolsets.ReadWrite},
+		{Name: "repos", Mode: toolsets.ReadOnly},
+	}
+
+	tsg, err := InitToolsetsWithConfig(configs, false, getClient, getGQLClient, mockTranslator)
+	if err != nil {
+		t.Fatalf("InitToolsetsWithConfig() error: %v", err)
+	}
+
+	// Verify context toolset exists and is enabled
+	contextToolset, exists := tsg.Toolsets["context"]
+	if !exists {
+		t.Fatalf("Expected context toolset to exist")
+	}
+
+	if !contextToolset.Enabled {
+		t.Errorf("Expected context toolset to be enabled")
+	}
+
+	if contextToolset.Mode != toolsets.ReadWrite {
+		t.Errorf("Expected context toolset to have ReadWrite mode, got %s", contextToolset.Mode)
+	}
+
+	// Verify context toolset has the expected tools
+	activeTools := contextToolset.GetActiveTools()
+	if len(activeTools) == 0 {
+		t.Errorf("Expected context toolset to have tools")
+	}
+
+	// Check that we have the get_me tool
+	found := false
+	for _, tool := range activeTools {
+		if tool.Tool.Name == "get_me" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected context toolset to have get_me tool")
+	}
+
+	t.Logf("Context toolset has %d active tools", len(activeTools))
 }

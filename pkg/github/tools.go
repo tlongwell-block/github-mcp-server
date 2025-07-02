@@ -104,6 +104,12 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, get
 	// Keep experiments alive so the system doesn't error out when it's always enabled
 	experiments := toolsets.NewToolset("experiments", "Experimental features that are not considered stable yet")
 
+	// Create context toolset (always available)
+	context := toolsets.NewToolset("context", "Tools that provide context about the current user and GitHub context you are operating in").
+		AddReadTools(
+			toolsets.NewServerTool(GetMe(getClient, t)),
+		)
+
 	// Add toolsets to the group
 	tsg.AddToolset(repos)
 	tsg.AddToolset(issues)
@@ -112,6 +118,7 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, get
 	tsg.AddToolset(codeSecurity)
 	tsg.AddToolset(secretProtection)
 	tsg.AddToolset(experiments)
+	tsg.AddToolset(context)
 
 	// Enable the requested toolsets with their configurations
 	if err := tsg.EnableToolsetsWithConfig(configs); err != nil {
