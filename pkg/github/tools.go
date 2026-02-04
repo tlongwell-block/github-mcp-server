@@ -11,8 +11,8 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
-type GetClientFn func(context.Context) (*github.Client, error)
-type GetGQLClientFn func(context.Context) (*githubv4.Client, error)
+type GetClientFn func(ctx context.Context, owner string) (*github.Client, error)
+type GetGQLClientFn func(ctx context.Context, owner string) (*githubv4.Client, error)
 
 var DefaultTools = []string{"all"}
 

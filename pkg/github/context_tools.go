@@ -25,7 +25,7 @@ func GetMe(getClient GetClientFn, t translations.TranslationHelperFunc) (tool mc
 			),
 		),
 		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, "")
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}

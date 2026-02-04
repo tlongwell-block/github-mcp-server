@@ -110,7 +110,7 @@ func RepositoryResourceContentsHandler(getClient GetClientFn) func(ctx context.C
 			opts.Ref = "refs/pull/" + prNumber[0] + "/head"
 		}
 
-		client, err := getClient(ctx)
+		client, err := getClient(ctx, owner)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 		}
