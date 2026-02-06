@@ -31,6 +31,14 @@ func createClient(cfg MCPServerConfig) (*gogithub.Client, error) {
 	appID := viper.GetInt64("app_id")
 	installationID := viper.GetInt64("installation_id")
 
+	// If no default installation ID, use first multi-org installation as fallback
+	if installationID == 0 && len(cfg.Installations) > 0 {
+		for _, id := range cfg.Installations {
+			installationID = id
+			break
+		}
+	}
+
 	// Check for private key - can be provided as file path or direct content
 	privateKeyPath := viper.GetString("private_key_file_path")
 	privateKeyContent := viper.GetString("private_key")
@@ -99,6 +107,14 @@ func createGQLClient(cfg MCPServerConfig) (*githubv4.Client, *http.Client, error
 	// Try GitHub App authentication first
 	appID := viper.GetInt64("app_id")
 	installationID := viper.GetInt64("installation_id")
+
+	// If no default installation ID, use first multi-org installation as fallback
+	if installationID == 0 && len(cfg.Installations) > 0 {
+		for _, id := range cfg.Installations {
+			installationID = id
+			break
+		}
+	}
 
 	// Check for private key - can be provided as file path or direct content
 	privateKeyPath := viper.GetString("private_key_file_path")

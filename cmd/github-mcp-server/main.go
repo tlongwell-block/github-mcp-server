@@ -155,14 +155,18 @@ func validateAuthConfig() error {
 	hasInstallationID := installationID != 0
 	hasPrivateKey := privateKeyPath != "" || privateKey != ""
 
-	if (hasAppID || hasInstallationID || hasPrivateKey) && !(hasAppID && hasInstallationID && hasPrivateKey) {
-		return errors.New("incomplete GitHub App configuration: GITHUB_APP_ID, GITHUB_INSTALLATION_ID, and either GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY must all be set")
+	// Also check for multi-org installation IDs (GITHUB_INSTALLATION_ID_<ORG>)
+	hasMultiOrgInstallations := len(parseOrgInstallations()) > 0
+	hasAnyInstallation := hasInstallationID || hasMultiOrgInstallations
+
+	if (hasAppID || hasAnyInstallation || hasPrivateKey) && !(hasAppID && hasAnyInstallation && hasPrivateKey) {
+		return errors.New("incomplete GitHub App configuration: GITHUB_APP_ID, GITHUB_INSTALLATION_ID (or GITHUB_INSTALLATION_ID_<ORG>), and either GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY must all be set")
 	}
 
 	// Check PAT if GitHub App auth is not configured
 	token := viper.GetString("personal_access_token")
 	if !hasAppID && token == "" {
-		return errors.New("no authentication method configured: either set GITHUB_PERSONAL_ACCESS_TOKEN or configure GitHub App authentication with GITHUB_APP_ID, GITHUB_INSTALLATION_ID, and GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY")
+		return errors.New("no authentication method configured: either set GITHUB_PERSONAL_ACCESS_TOKEN or configure GitHub App authentication with GITHUB_APP_ID, GITHUB_INSTALLATION_ID (or GITHUB_INSTALLATION_ID_<ORG>), and GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY")
 	}
 
 	return nil
