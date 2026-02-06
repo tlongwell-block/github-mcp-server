@@ -152,18 +152,18 @@ func TestRepoAwareClientFactory_GetClientForRepo(t *testing.T) {
 
 	// Test context-based client selection
 	ctx := WithRepoContext(context.Background(), "owner", "private-repo")
-	client, err = factory.GetClientFn()(ctx)
+	client, err = factory.GetClientFn()(ctx, "")
 	assert.NoError(t, err)
 	assert.Equal(t, authClient, client)
 
 	ctx = WithRepoContext(context.Background(), "owner", "public-repo")
-	client, err = factory.GetClientFn()(ctx)
+	client, err = factory.GetClientFn()(ctx, "")
 	assert.NoError(t, err)
 	assert.NotEqual(t, authClient, client)
 
 	// Test missing context info
 	ctx = context.Background()
-	client, err = factory.GetClientFn()(ctx)
+	client, err = factory.GetClientFn()(ctx, "")
 	assert.NoError(t, err)
 	assert.Equal(t, authClient, client) // Should default to auth client
 }

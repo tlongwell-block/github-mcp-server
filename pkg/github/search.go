@@ -40,7 +40,9 @@ func SearchRepositories(getClient GetClientFn, t translations.TranslationHelperF
 			// This is a simple heuristic to check if the query contains a specific repository
 			// Format could be "repo:owner/repo" or similar
 			repoQuery := extractRepoFromQuery(query)
+			owner := ""
 			if repoQuery.owner != "" && repoQuery.repo != "" {
+				owner = repoQuery.owner
 				ctx = WithRepoContext(ctx, repoQuery.owner, repoQuery.repo)
 			}
 
@@ -51,7 +53,7 @@ func SearchRepositories(getClient GetClientFn, t translations.TranslationHelperF
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -119,7 +121,9 @@ func SearchCode(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 
 			// Extract repository info if present in the query
 			repoQuery := extractRepoFromQuery(query)
+			owner := ""
 			if repoQuery.owner != "" && repoQuery.repo != "" {
+				owner = repoQuery.owner
 				ctx = WithRepoContext(ctx, repoQuery.owner, repoQuery.repo)
 			}
 
@@ -132,7 +136,7 @@ func SearchCode(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -209,7 +213,7 @@ func SearchUsers(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, "")
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}

@@ -11,13 +11,13 @@ import (
 )
 
 func stubGetClientFn(client *github.Client) GetClientFn {
-	return func(_ context.Context) (*github.Client, error) {
+	return func(_ context.Context, _ string) (*github.Client, error) {
 		return client, nil
 	}
 }
 
 func stubGetGQLClientFn(client *githubv4.Client) GetGQLClientFn {
-	return func(_ context.Context) (*githubv4.Client, error) {
+	return func(_ context.Context, _ string) (*githubv4.Client, error) {
 		return client, nil
 	}
 }

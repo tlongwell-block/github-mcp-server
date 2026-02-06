@@ -48,7 +48,7 @@ func GetSecretScanningAlert(getClient GetClientFn, t translations.TranslationHel
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -126,7 +126,7 @@ func ListSecretScanningAlerts(getClient GetClientFn, t translations.TranslationH
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}

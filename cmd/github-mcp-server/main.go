@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/github/github-mcp-server/internal/ghmcp"
 	"github.com/github/github-mcp-server/pkg/github"
@@ -45,6 +47,9 @@ var (
 				return fmt.Errorf("failed to unmarshal toolsets: %w", err)
 			}
 
+			// Parse multi-org installations
+			installations := parseOrgInstallations()
+
 			stdioServerConfig := ghmcp.StdioServerConfig{
 				Version:              version,
 				Host:                 viper.GetString("host"),
@@ -55,12 +60,41 @@ var (
 				ExportTranslations:   viper.GetBool("export-translations"),
 				EnableCommandLogging: viper.GetBool("enable-command-logging"),
 				LogFilePath:          viper.GetString("log-file"),
+				Installations:        installations,
 			}
 
 			return ghmcp.RunStdioServer(stdioServerConfig)
 		},
 	}
 )
+
+// parseOrgInstallations parses GITHUB_INSTALLATION_ID_<ORG> environment variables
+// and returns a map of organization name to installation ID.
+// Also includes the default GITHUB_INSTALLATION_ID under "_default" key if set.
+func parseOrgInstallations() map[string]int64 {
+	installations := make(map[string]int64)
+	prefix := "GITHUB_INSTALLATION_ID_"
+
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, prefix) {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				org := strings.ToLower(strings.TrimPrefix(parts[0], prefix))
+				org = strings.ReplaceAll(org, "_", "-") // Normalize underscores to dashes
+				if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+					installations[org] = id
+				}
+			}
+		}
+	}
+
+	// Add default if set (for backwards compatibility)
+	if defaultID := viper.GetInt64("installation_id"); defaultID != 0 {
+		installations["_default"] = defaultID
+	}
+
+	return installations
+}
 
 func init() {
 	cobra.OnInitialize(initConfig)

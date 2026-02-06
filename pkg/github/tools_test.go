@@ -66,10 +66,10 @@ func TestInitToolsetsWithConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Mock client functions
-			getClient := func(ctx context.Context) (*github.Client, error) {
+			getClient := func(ctx context.Context, _ string) (*github.Client, error) {
 				return nil, nil
 			}
-			getGQLClient := func(ctx context.Context) (*githubv4.Client, error) {
+			getGQLClient := func(ctx context.Context, _ string) (*githubv4.Client, error) {
 				return nil, nil
 			}
 
@@ -119,10 +119,10 @@ func TestInitToolsets_BackwardCompatibility(t *testing.T) {
 	}
 
 	// Mock client functions
-	getClient := func(ctx context.Context) (*github.Client, error) {
+	getClient := func(ctx context.Context, _ string) (*github.Client, error) {
 		return nil, nil
 	}
-	getGQLClient := func(ctx context.Context) (*githubv4.Client, error) {
+	getGQLClient := func(ctx context.Context, _ string) (*githubv4.Client, error) {
 		return nil, nil
 	}
 
@@ -201,10 +201,10 @@ func TestToolsetModeFiltering(t *testing.T) {
 	}
 
 	// Mock client functions
-	getClient := func(ctx context.Context) (*github.Client, error) {
+	getClient := func(ctx context.Context, _ string) (*github.Client, error) {
 		return nil, nil
 	}
-	getGQLClient := func(ctx context.Context) (*githubv4.Client, error) {
+	getGQLClient := func(ctx context.Context, _ string) (*githubv4.Client, error) {
 		return nil, nil
 	}
 
@@ -326,10 +326,10 @@ func TestContextToolsetIntegration(t *testing.T) {
 	}
 
 	// Mock client functions
-	getClient := func(ctx context.Context) (*github.Client, error) {
+	getClient := func(ctx context.Context, _ string) (*github.Client, error) {
 		return nil, nil
 	}
-	getGQLClient := func(ctx context.Context) (*githubv4.Client, error) {
+	getGQLClient := func(ctx context.Context, _ string) (*githubv4.Client, error) {
 		return nil, nil
 	}
 
