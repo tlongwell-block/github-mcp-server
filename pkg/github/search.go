@@ -36,12 +36,13 @@ func SearchRepositories(getClient GetClientFn, t translations.TranslationHelperF
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			// Extract repository info if present in the query
-			// This is a simple heuristic to check if the query contains a specific repository
-			// Format could be "repo:owner/repo" or similar
 			repoQuery := extractRepoFromQuery(query)
+			owner := ""
 			if repoQuery.owner != "" && repoQuery.repo != "" {
+				owner = repoQuery.owner
 				ctx = WithRepoContext(ctx, repoQuery.owner, repoQuery.repo)
+			} else if org := extractOrgFromQuery(query); org != "" {
+				owner = org
 			}
 
 			opts := &github.SearchOptions{
@@ -51,7 +52,7 @@ func SearchRepositories(getClient GetClientFn, t translations.TranslationHelperF
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -117,10 +118,13 @@ func SearchCode(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			// Extract repository info if present in the query
 			repoQuery := extractRepoFromQuery(query)
+			owner := ""
 			if repoQuery.owner != "" && repoQuery.repo != "" {
+				owner = repoQuery.owner
 				ctx = WithRepoContext(ctx, repoQuery.owner, repoQuery.repo)
+			} else if org := extractOrgFromQuery(query); org != "" {
+				owner = org
 			}
 
 			opts := &github.SearchOptions{
@@ -132,7 +136,7 @@ func SearchCode(getClient GetClientFn, t translations.TranslationHelperFunc) (to
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -209,7 +213,9 @@ func SearchUsers(getClient GetClientFn, t translations.TranslationHelperFunc) (t
 				},
 			}
 
-			client, err := getClient(ctx)
+			owner := extractOrgFromQuery(query)
+
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}

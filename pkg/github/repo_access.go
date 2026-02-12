@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v69/github"
+	"github.com/shurcooL/githubv4"
 )
 
 // RepoAccessType indicates how a repository should be accessed
@@ -145,17 +148,162 @@ func WithRepoContext(ctx context.Context, owner, repo string) context.Context {
 	return ctx
 }
 
-// GetClientFn returns a function that gets the appropriate client based on context
+// GetClientFn returns a function that gets the appropriate client based on context or owner
 func (f *RepoAwareClientFactory) GetClientFn() GetClientFn {
-	return func(ctx context.Context) (*github.Client, error) {
-		owner, ok1 := ctx.Value("github.owner").(string)
-		repo, ok2 := ctx.Value("github.repo").(string)
+	return func(ctx context.Context, owner string) (*github.Client, error) {
+		// If owner not provided, try to get from context
+		if owner == "" {
+			ownerFromCtx, ok1 := ctx.Value("github.owner").(string)
+			repo, ok2 := ctx.Value("github.repo").(string)
 
-		if !ok1 || !ok2 {
-			// If we can't determine the repo, use authenticated client
-			return f.authClient, nil
+			if !ok1 || !ok2 {
+				// If we can't determine the repo, use authenticated client
+				return f.authClient, nil
+			}
+
+			return f.GetClientForRepo(ctx, ownerFromCtx, repo)
 		}
 
-		return f.GetClientForRepo(ctx, owner, repo)
+		// Use provided owner
+		return f.authClient, nil
 	}
+}
+
+// MultiOrgClientFactory creates GitHub clients for different organizations
+type MultiOrgClientFactory struct {
+	appID          int64
+	privateKey     []byte
+	installations  map[string]int64 // org -> installation_id
+	defaultInstall int64
+	transports     map[string]*ghinstallation.Transport // cached per-org
+	transportsMu   sync.RWMutex
+	host           string
+	version        string
+}
+
+// NewMultiOrgClientFactory creates a new multi-org client factory
+func NewMultiOrgClientFactory(
+	appID int64,
+	privateKey []byte,
+	installations map[string]int64,
+	host, version string,
+) *MultiOrgClientFactory {
+	defaultInstall := installations["_default"]
+	delete(installations, "_default")
+
+	return &MultiOrgClientFactory{
+		appID:          appID,
+		privateKey:     privateKey,
+		installations:  installations,
+		defaultInstall: defaultInstall,
+		transports:     make(map[string]*ghinstallation.Transport),
+		host:           host,
+		version:        version,
+	}
+}
+
+// getInstallationID returns the installation ID for a given organization
+func (f *MultiOrgClientFactory) getInstallationID(owner string) int64 {
+	owner = strings.ToLower(owner)
+
+	// Try exact match first
+	if id, ok := f.installations[owner]; ok {
+		return id
+	}
+
+	// Fall back to default
+	return f.defaultInstall
+}
+
+// GetClientFn returns a function that gets the appropriate client based on owner
+func (f *MultiOrgClientFactory) GetClientFn() GetClientFn {
+	return func(ctx context.Context, owner string) (*github.Client, error) {
+		if owner == "" {
+			// User-scoped operations (GetMe) use default
+			owner = "_default"
+		}
+
+		installID := f.getInstallationID(owner)
+		if installID == 0 && len(f.installations) > 0 {
+			for _, id := range f.installations {
+				installID = id
+				break
+			}
+		}
+		if installID == 0 {
+			client := github.NewClient(nil)
+			client.UserAgent = fmt.Sprintf("github-mcp-server/%s", f.version)
+			return client, nil
+		}
+
+		// Get or create transport for this installation
+		transport, err := f.getOrCreateTransport(owner, installID)
+		if err != nil {
+			return nil, err
+		}
+
+		client := github.NewClient(&http.Client{Transport: transport})
+		client.UserAgent = fmt.Sprintf("github-mcp-server/%s", f.version)
+		return client, nil
+	}
+}
+
+// GetGQLClientFn returns a function that gets the appropriate GraphQL client based on owner
+func (f *MultiOrgClientFactory) GetGQLClientFn() GetGQLClientFn {
+	return func(ctx context.Context, owner string) (*githubv4.Client, error) {
+		if owner == "" {
+			// User-scoped operations use default
+			owner = "_default"
+		}
+
+		installID := f.getInstallationID(owner)
+		if installID == 0 && len(f.installations) > 0 {
+			for _, id := range f.installations {
+				installID = id
+				break
+			}
+		}
+		if installID == 0 {
+			return githubv4.NewClient(nil), nil
+		}
+
+		// Get or create transport for this installation
+		transport, err := f.getOrCreateTransport(owner, installID)
+		if err != nil {
+			return nil, err
+		}
+
+		client := githubv4.NewClient(&http.Client{Transport: transport})
+		return client, nil
+	}
+}
+
+// getOrCreateTransport gets or creates a cached transport for an organization
+func (f *MultiOrgClientFactory) getOrCreateTransport(org string, installID int64) (*ghinstallation.Transport, error) {
+	f.transportsMu.RLock()
+	if t, ok := f.transports[org]; ok {
+		f.transportsMu.RUnlock()
+		return t, nil
+	}
+	f.transportsMu.RUnlock()
+
+	f.transportsMu.Lock()
+	defer f.transportsMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if t, ok := f.transports[org]; ok {
+		return t, nil
+	}
+
+	transport, err := ghinstallation.New(http.DefaultTransport, f.appID, installID, f.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transport for %s: %w", org, err)
+	}
+
+	if f.host != "" {
+		transport.BaseURL = f.host
+	}
+
+	f.transports[org] = transport
+	return transport, nil
 }

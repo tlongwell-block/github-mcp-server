@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/github/github-mcp-server/pkg/github"
@@ -31,6 +30,14 @@ func createClient(cfg MCPServerConfig) (*gogithub.Client, error) {
 	// Try GitHub App authentication first
 	appID := viper.GetInt64("app_id")
 	installationID := viper.GetInt64("installation_id")
+
+	// If no default installation ID, use first multi-org installation as fallback
+	if installationID == 0 && len(cfg.Installations) > 0 {
+		for _, id := range cfg.Installations {
+			installationID = id
+			break
+		}
+	}
 
 	// Check for private key - can be provided as file path or direct content
 	privateKeyPath := viper.GetString("private_key_file_path")
@@ -100,6 +107,14 @@ func createGQLClient(cfg MCPServerConfig) (*githubv4.Client, *http.Client, error
 	// Try GitHub App authentication first
 	appID := viper.GetInt64("app_id")
 	installationID := viper.GetInt64("installation_id")
+
+	// If no default installation ID, use first multi-org installation as fallback
+	if installationID == 0 && len(cfg.Installations) > 0 {
+		for _, id := range cfg.Installations {
+			installationID = id
+			break
+		}
+	}
 
 	// Check for private key - can be provided as file path or direct content
 	privateKeyPath := viper.GetString("private_key_file_path")
@@ -201,6 +216,9 @@ type MCPServerConfig struct {
 	// ReadOnly indicates if we should only offer read-only tools
 	ReadOnly bool
 
+	// Installations maps organization names to GitHub App installation IDs
+	Installations map[string]int64
+
 	// Translator provides translated text for the server tooling
 	Translator translations.TranslationHelperFunc
 }
@@ -212,8 +230,8 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 		return nil, fmt.Errorf("failed to create GitHub REST client: %w", err)
 	}
 
-	// Create GraphQL client
-	gqlClient, gqlHTTPClient, err := createGQLClient(cfg)
+	// Create GraphQL client (for user agent hook only; actual GQL clients from factory)
+	_, gqlHTTPClient, err := createGQLClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GitHub GraphQL client: %w", err)
 	}
@@ -252,13 +270,19 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 		}
 	}
 
-	// Create repository-aware client factory with 1-hour cache TTL
-	clientFactory := github.NewRepoAwareClientFactory(restClient, 1*time.Hour)
-	getClient := clientFactory.GetClientFn()
+	// Create multi-org client factory
+	appID := viper.GetInt64("app_id")
+	privateKey := []byte(viper.GetString("private_key"))
 
-	getGQLClient := func(_ context.Context) (*githubv4.Client, error) {
-		return gqlClient, nil // closing over client
-	}
+	clientFactory := github.NewMultiOrgClientFactory(
+		appID,
+		privateKey,
+		cfg.Installations,
+		cfg.Host,
+		cfg.Version,
+	)
+	getClient := clientFactory.GetClientFn()
+	getGQLClient := clientFactory.GetGQLClientFn()
 
 	// Create default toolsets
 	toolsets, err := github.InitToolsets(
@@ -272,12 +296,10 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 		return nil, fmt.Errorf("failed to initialize toolsets: %w", err)
 	}
 
-	context := github.InitContextToolset(getClient, cfg.Translator)
 	github.RegisterResources(ghServer, getClient, cfg.Translator)
 
 	// Register the tools with the server
 	toolsets.RegisterTools(ghServer)
-	context.RegisterTools(ghServer)
 
 	if cfg.DynamicToolsets {
 		dynamic := github.InitDynamicToolset(ghServer, toolsets, cfg.Translator)
@@ -317,6 +339,9 @@ type StdioServerConfig struct {
 
 	// Path to the log file if not stderr
 	LogFilePath string
+
+	// Installations maps organization names to GitHub App installation IDs
+	Installations map[string]int64
 }
 
 // RunStdioServer is not concurrent safe.
@@ -334,6 +359,7 @@ func RunStdioServer(cfg StdioServerConfig) error {
 		EnabledToolsets: cfg.EnabledToolsets,
 		DynamicToolsets: cfg.DynamicToolsets,
 		ReadOnly:        cfg.ReadOnly,
+		Installations:   cfg.Installations,
 		Translator:      t,
 	})
 	if err != nil {

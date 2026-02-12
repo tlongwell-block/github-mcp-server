@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/github/github-mcp-server/internal/ghmcp"
 	"github.com/github/github-mcp-server/pkg/github"
@@ -45,6 +47,9 @@ var (
 				return fmt.Errorf("failed to unmarshal toolsets: %w", err)
 			}
 
+			// Parse multi-org installations
+			installations := parseOrgInstallations()
+
 			stdioServerConfig := ghmcp.StdioServerConfig{
 				Version:              version,
 				Host:                 viper.GetString("host"),
@@ -55,6 +60,7 @@ var (
 				ExportTranslations:   viper.GetBool("export-translations"),
 				EnableCommandLogging: viper.GetBool("enable-command-logging"),
 				LogFilePath:          viper.GetString("log-file"),
+				Installations:        installations,
 			}
 
 			return ghmcp.RunStdioServer(stdioServerConfig)
@@ -62,13 +68,41 @@ var (
 	}
 )
 
+// parseOrgInstallations parses GITHUB_INSTALLATION_ID_<ORG> environment variables
+// and returns a map of organization name to installation ID.
+// Also includes the default GITHUB_INSTALLATION_ID under "_default" key if set.
+func parseOrgInstallations() map[string]int64 {
+	installations := make(map[string]int64)
+	prefix := "GITHUB_INSTALLATION_ID_"
+
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, prefix) {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				org := strings.ToLower(strings.TrimPrefix(parts[0], prefix))
+				org = strings.ReplaceAll(org, "_", "-") // Normalize underscores to dashes
+				if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+					installations[org] = id
+				}
+			}
+		}
+	}
+
+	// Add default if set (for backwards compatibility)
+	if defaultID := viper.GetInt64("installation_id"); defaultID != 0 {
+		installations["_default"] = defaultID
+	}
+
+	return installations
+}
+
 func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.SetVersionTemplate("{{.Short}}\n{{.Version}}\n")
 
 	// Add global flags that will be shared by all commands
-	rootCmd.PersistentFlags().StringSlice("toolsets", github.DefaultTools, "An optional comma separated list of groups of tools to allow, defaults to enabling all")
+	rootCmd.PersistentFlags().StringSlice("toolsets", github.DefaultTools, "An optional comma separated list of groups of tools to allow with optional modes (e.g., 'repos:rw,issues:ro,users'), defaults to enabling all")
 	rootCmd.PersistentFlags().Bool("dynamic-toolsets", false, "Enable dynamic toolsets")
 	rootCmd.PersistentFlags().Bool("read-only", false, "Restrict the server to read-only operations")
 	rootCmd.PersistentFlags().String("log-file", "", "Path to log file")
@@ -84,6 +118,7 @@ func init() {
 
 	// Bind flag to viper
 	_ = viper.BindPFlag("toolsets", rootCmd.PersistentFlags().Lookup("toolsets"))
+	_ = viper.BindEnv("toolsets", "GITHUB_TOOLSETS")
 	_ = viper.BindPFlag("dynamic_toolsets", rootCmd.PersistentFlags().Lookup("dynamic-toolsets"))
 	_ = viper.BindPFlag("read-only", rootCmd.PersistentFlags().Lookup("read-only"))
 	_ = viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
@@ -120,14 +155,18 @@ func validateAuthConfig() error {
 	hasInstallationID := installationID != 0
 	hasPrivateKey := privateKeyPath != "" || privateKey != ""
 
-	if (hasAppID || hasInstallationID || hasPrivateKey) && !(hasAppID && hasInstallationID && hasPrivateKey) {
-		return errors.New("incomplete GitHub App configuration: GITHUB_APP_ID, GITHUB_INSTALLATION_ID, and either GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY must all be set")
+	// Also check for multi-org installation IDs (GITHUB_INSTALLATION_ID_<ORG>)
+	hasMultiOrgInstallations := len(parseOrgInstallations()) > 0
+	hasAnyInstallation := hasInstallationID || hasMultiOrgInstallations
+
+	if (hasAppID || hasAnyInstallation || hasPrivateKey) && !(hasAppID && hasAnyInstallation && hasPrivateKey) {
+		return errors.New("incomplete GitHub App configuration: GITHUB_APP_ID, GITHUB_INSTALLATION_ID (or GITHUB_INSTALLATION_ID_<ORG>), and either GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY must all be set")
 	}
 
 	// Check PAT if GitHub App auth is not configured
 	token := viper.GetString("personal_access_token")
 	if !hasAppID && token == "" {
-		return errors.New("no authentication method configured: either set GITHUB_PERSONAL_ACCESS_TOKEN or configure GitHub App authentication with GITHUB_APP_ID, GITHUB_INSTALLATION_ID, and GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY")
+		return errors.New("no authentication method configured: either set GITHUB_PERSONAL_ACCESS_TOKEN or configure GitHub App authentication with GITHUB_APP_ID, GITHUB_INSTALLATION_ID (or GITHUB_INSTALLATION_ID_<ORG>), and GITHUB_PRIVATE_KEY_FILE_PATH or GITHUB_PRIVATE_KEY")
 	}
 
 	return nil

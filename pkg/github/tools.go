@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/github/github-mcp-server/pkg/toolsets"
 	"github.com/github/github-mcp-server/pkg/translations"
@@ -10,12 +11,22 @@ import (
 	"github.com/shurcooL/githubv4"
 )
 
-type GetClientFn func(context.Context) (*github.Client, error)
-type GetGQLClientFn func(context.Context) (*githubv4.Client, error)
+type GetClientFn func(ctx context.Context, owner string) (*github.Client, error)
+type GetGQLClientFn func(ctx context.Context, owner string) (*githubv4.Client, error)
 
 var DefaultTools = []string{"all"}
 
 func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
+	// Parse toolset configurations from the passed toolsets
+	configs, err := toolsets.ParseToolsetConfigFromSlice(passedToolsets)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse toolset configuration: %w", err)
+	}
+
+	return InitToolsetsWithConfig(configs, readOnly, getClient, getGQLClient, t)
+}
+
+func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
 	// Create a new toolset group
 	tsg := toolsets.NewToolsetGroup(readOnly)
 
@@ -93,6 +104,12 @@ func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn,
 	// Keep experiments alive so the system doesn't error out when it's always enabled
 	experiments := toolsets.NewToolset("experiments", "Experimental features that are not considered stable yet")
 
+	// Create context toolset (always available)
+	context := toolsets.NewToolset("context", "Tools that provide context about the current user and GitHub context you are operating in").
+		AddReadTools(
+			toolsets.NewServerTool(GetMe(getClient, t)),
+		)
+
 	// Add toolsets to the group
 	tsg.AddToolset(repos)
 	tsg.AddToolset(issues)
@@ -101,9 +118,10 @@ func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn,
 	tsg.AddToolset(codeSecurity)
 	tsg.AddToolset(secretProtection)
 	tsg.AddToolset(experiments)
-	// Enable the requested features
+	tsg.AddToolset(context)
 
-	if err := tsg.EnableToolsets(passedToolsets); err != nil {
+	// Enable the requested toolsets with their configurations
+	if err := tsg.EnableToolsetsWithConfig(configs); err != nil {
 		return nil, err
 	}
 

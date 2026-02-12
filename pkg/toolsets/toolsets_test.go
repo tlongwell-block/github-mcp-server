@@ -228,3 +228,108 @@ func TestIsEnabledWithEverythingOn(t *testing.T) {
 		t.Error("Expected IsEnabled to return true for any toolset when everythingOn is true")
 	}
 }
+
+func TestEnableToolsetsWithConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		configs  []ToolsetConfig
+		wantErr  bool
+		expected map[string]ToolsetMode
+	}{
+		{
+			name: "enable single toolset with rw mode",
+			configs: []ToolsetConfig{
+				{Name: "repos", Mode: ReadWrite},
+			},
+			wantErr: false,
+			expected: map[string]ToolsetMode{
+				"repos": ReadWrite,
+			},
+		},
+		{
+			name: "enable single toolset with ro mode",
+			configs: []ToolsetConfig{
+				{Name: "repos", Mode: ReadOnly},
+			},
+			wantErr: false,
+			expected: map[string]ToolsetMode{
+				"repos": ReadOnly,
+			},
+		},
+		{
+			name: "enable multiple toolsets with mixed modes",
+			configs: []ToolsetConfig{
+				{Name: "repos", Mode: ReadWrite},
+				{Name: "issues", Mode: ReadOnly},
+				{Name: "users", Mode: ReadWrite},
+			},
+			wantErr: false,
+			expected: map[string]ToolsetMode{
+				"repos":  ReadWrite,
+				"issues": ReadOnly,
+				"users":  ReadWrite,
+			},
+		},
+		{
+			name: "enable all with ro mode",
+			configs: []ToolsetConfig{
+				{Name: "all", Mode: ReadOnly},
+			},
+			wantErr: false,
+			expected: map[string]ToolsetMode{
+				"repos":  ReadOnly,
+				"issues": ReadOnly,
+				"users":  ReadOnly,
+			},
+		},
+		{
+			name: "enable nonexistent toolset",
+			configs: []ToolsetConfig{
+				{Name: "nonexistent", Mode: ReadWrite},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset toolset group
+			tsg := NewToolsetGroup(false)
+			tsg.AddToolset(NewToolset("repos", "Repository tools"))
+			tsg.AddToolset(NewToolset("issues", "Issue tools"))
+			tsg.AddToolset(NewToolset("users", "User tools"))
+
+			err := tsg.EnableToolsetsWithConfig(tt.configs)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("EnableToolsetsWithConfig() expected error but got none")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("EnableToolsetsWithConfig() unexpected error: %v", err)
+				return
+			}
+
+			// Check that expected toolsets are enabled with correct modes
+			for name, expectedMode := range tt.expected {
+				toolset := tsg.Toolsets[name]
+				if !toolset.Enabled {
+					t.Errorf("Expected toolset %s to be enabled", name)
+				}
+				if toolset.Mode != expectedMode {
+					t.Errorf("Expected toolset %s to have mode %s, got %s", name, expectedMode, toolset.Mode)
+				}
+			}
+
+			// Check that non-expected toolsets are not enabled
+			for name, toolset := range tsg.Toolsets {
+				if _, expected := tt.expected[name]; !expected && toolset.Enabled {
+					t.Errorf("Expected toolset %s to not be enabled", name)
+				}
+			}
+		})
+	}
+}

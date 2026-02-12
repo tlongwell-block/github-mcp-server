@@ -50,7 +50,7 @@ func GetPullRequest(getClient GetClientFn, t translations.TranslationHelperFunc)
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -165,7 +165,7 @@ func CreatePullRequest(getClient GetClientFn, t translations.TranslationHelperFu
 			newPR.Draft = github.Ptr(draft)
 			newPR.MaintainerCanModify = github.Ptr(maintainerCanModify)
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -286,7 +286,7 @@ func UpdatePullRequest(getClient GetClientFn, t translations.TranslationHelperFu
 				return mcp.NewToolResultError("No update parameters provided."), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -395,7 +395,7 @@ func ListPullRequests(getClient GetClientFn, t translations.TranslationHelperFun
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -484,7 +484,7 @@ func MergePullRequest(getClient GetClientFn, t translations.TranslationHelperFun
 				MergeMethod: mergeMethod,
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -546,7 +546,7 @@ func GetPullRequestFiles(getClient GetClientFn, t translations.TranslationHelper
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -609,7 +609,7 @@ func GetPullRequestStatus(getClient GetClientFn, t translations.TranslationHelpe
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			// First get the PR to find the head SHA
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -697,7 +697,7 @@ func UpdatePullRequestBranch(getClient GetClientFn, t translations.TranslationHe
 				opts.ExpectedHeadSHA = github.Ptr(expectedHeadSHA)
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -770,7 +770,7 @@ func GetPullRequestComments(getClient GetClientFn, t translations.TranslationHel
 				},
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -832,7 +832,7 @@ func GetPullRequestReviews(getClient GetClientFn, t translations.TranslationHelp
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}
@@ -908,7 +908,7 @@ func CreateAndSubmitPullRequestReview(getGQLClient GetGQLClientFn, t translation
 			}
 
 			// Given our owner, repo and PR number, lookup the GQL ID of the PR.
-			client, err := getGQLClient(ctx)
+			client, err := getGQLClient(ctx, params.Owner)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to get GitHub GQL client: %v", err)), nil
 			}
@@ -999,7 +999,7 @@ func CreatePendingPullRequestReview(getGQLClient GetGQLClientFn, t translations.
 			}
 
 			// Given our owner, repo and PR number, lookup the GQL ID of the PR.
-			client, err := getGQLClient(ctx)
+			client, err := getGQLClient(ctx, params.Owner)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to get GitHub GQL client: %v", err)), nil
 			}
@@ -1121,7 +1121,7 @@ func AddPullRequestReviewCommentToPendingReview(getGQLClient GetGQLClientFn, t t
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getGQLClient(ctx)
+			client, err := getGQLClient(ctx, params.Owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub GQL client: %w", err)
 			}
@@ -1252,7 +1252,7 @@ func SubmitPendingPullRequestReview(getGQLClient GetGQLClientFn, t translations.
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getGQLClient(ctx)
+			client, err := getGQLClient(ctx, params.Owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub GQL client: %w", err)
 			}
@@ -1367,7 +1367,7 @@ func DeletePendingPullRequestReview(getGQLClient GetGQLClientFn, t translations.
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getGQLClient(ctx)
+			client, err := getGQLClient(ctx, params.Owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub GQL client: %w", err)
 			}
@@ -1476,7 +1476,7 @@ func GetPullRequestDiff(getClient GetClientFn, t translations.TranslationHelperF
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, params.Owner)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to get GitHub client: %v", err)), nil
 			}
@@ -1546,7 +1546,7 @@ func RequestCopilotReview(getClient GetClientFn, t translations.TranslationHelpe
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 
-			client, err := getClient(ctx)
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
