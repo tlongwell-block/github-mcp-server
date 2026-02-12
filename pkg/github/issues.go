@@ -211,7 +211,9 @@ func SearchIssues(getClient GetClientFn, t translations.TranslationHelperFunc) (
 				},
 			}
 
-			client, err := getClient(ctx, "")
+			owner := extractOrgFromQuery(query)
+
+			client, err := getClient(ctx, owner)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get GitHub client: %w", err)
 			}

@@ -39,3 +39,14 @@ func extractRepoFromQuery(query string) repoQueryInfo {
 
 	return repoQueryInfo{}
 }
+
+// extractOrgFromQuery attempts to extract an organization or user name from a search query.
+// It looks for patterns like "org:squareup" or "user:octocat".
+func extractOrgFromQuery(query string) string {
+	orgPattern := regexp.MustCompile(`(?:org|user):([^\s]+)`)
+	matches := orgPattern.FindStringSubmatch(query)
+	if len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}

@@ -224,9 +224,13 @@ func (f *MultiOrgClientFactory) GetClientFn() GetClientFn {
 		}
 
 		installID := f.getInstallationID(owner)
+		if installID == 0 && len(f.installations) > 0 {
+			for _, id := range f.installations {
+				installID = id
+				break
+			}
+		}
 		if installID == 0 {
-			// No installation for this org - return anonymous client
-			// This allows public repo operations to succeed
 			client := github.NewClient(nil)
 			client.UserAgent = fmt.Sprintf("github-mcp-server/%s", f.version)
 			return client, nil
@@ -253,8 +257,13 @@ func (f *MultiOrgClientFactory) GetGQLClientFn() GetGQLClientFn {
 		}
 
 		installID := f.getInstallationID(owner)
+		if installID == 0 && len(f.installations) > 0 {
+			for _, id := range f.installations {
+				installID = id
+				break
+			}
+		}
 		if installID == 0 {
-			// No installation for this org - return anonymous client
 			return githubv4.NewClient(nil), nil
 		}
 
