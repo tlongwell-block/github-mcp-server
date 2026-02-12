@@ -167,12 +167,12 @@ func Test_SearchCode(t *testing.T) {
 
 	assert.Equal(t, "search_code", tool.Name)
 	assert.NotEmpty(t, tool.Description)
-	assert.Contains(t, tool.InputSchema.Properties, "q")
+	assert.Contains(t, tool.InputSchema.Properties, "query")
 	assert.Contains(t, tool.InputSchema.Properties, "sort")
 	assert.Contains(t, tool.InputSchema.Properties, "order")
 	assert.Contains(t, tool.InputSchema.Properties, "perPage")
 	assert.Contains(t, tool.InputSchema.Properties, "page")
-	assert.ElementsMatch(t, tool.InputSchema.Required, []string{"q"})
+	assert.ElementsMatch(t, tool.InputSchema.Required, []string{"query"})
 
 	// Setup mock search results
 	mockSearchResult := &github.CodeSearchResult{
@@ -221,7 +221,7 @@ func Test_SearchCode(t *testing.T) {
 				),
 			),
 			requestArgs: map[string]interface{}{
-				"q":       "fmt.Println language:go",
+				"query":   "fmt.Println language:go",
 				"sort":    "indexed",
 				"order":   "desc",
 				"page":    float64(1),
@@ -245,7 +245,7 @@ func Test_SearchCode(t *testing.T) {
 				),
 			),
 			requestArgs: map[string]interface{}{
-				"q": "fmt.Println language:go",
+				"query": "fmt.Println language:go",
 			},
 			expectError:    false,
 			expectedResult: mockSearchResult,
@@ -262,7 +262,7 @@ func Test_SearchCode(t *testing.T) {
 				),
 			),
 			requestArgs: map[string]interface{}{
-				"q": "invalid:query",
+				"query": "invalid:query",
 			},
 			expectError:    true,
 			expectedErrMsg: "failed to search code",
@@ -293,22 +293,88 @@ func Test_SearchCode(t *testing.T) {
 			// Parse the result and get the text content if no error
 			textContent := getTextResult(t, result)
 
-			// Unmarshal and verify the result
-			var returnedResult github.CodeSearchResult
+			// Unmarshal into MinimalCodeSearchResult (not raw CodeSearchResult)
+			var returnedResult MinimalCodeSearchResult
 			err = json.Unmarshal([]byte(textContent.Text), &returnedResult)
 			require.NoError(t, err)
-			assert.Equal(t, *tc.expectedResult.Total, *returnedResult.Total)
-			assert.Equal(t, *tc.expectedResult.IncompleteResults, *returnedResult.IncompleteResults)
-			assert.Len(t, returnedResult.CodeResults, len(tc.expectedResult.CodeResults))
-			for i, code := range returnedResult.CodeResults {
-				assert.Equal(t, *tc.expectedResult.CodeResults[i].Name, *code.Name)
-				assert.Equal(t, *tc.expectedResult.CodeResults[i].Path, *code.Path)
-				assert.Equal(t, *tc.expectedResult.CodeResults[i].SHA, *code.SHA)
-				assert.Equal(t, *tc.expectedResult.CodeResults[i].HTMLURL, *code.HTMLURL)
-				assert.Equal(t, *tc.expectedResult.CodeResults[i].Repository.FullName, *code.Repository.FullName)
+			assert.Equal(t, *tc.expectedResult.Total, returnedResult.TotalCount)
+			assert.Equal(t, *tc.expectedResult.IncompleteResults, returnedResult.IncompleteResults)
+			assert.Len(t, returnedResult.Items, len(tc.expectedResult.CodeResults))
+			for i, item := range returnedResult.Items {
+				assert.Equal(t, tc.expectedResult.CodeResults[i].GetName(), item.Name)
+				assert.Equal(t, tc.expectedResult.CodeResults[i].GetPath(), item.Path)
+				assert.Equal(t, tc.expectedResult.CodeResults[i].GetHTMLURL(), item.HTMLURL)
+				assert.Equal(t, tc.expectedResult.CodeResults[i].GetRepository().GetFullName(), item.Repository)
 			}
 		})
 	}
+}
+
+func Test_SearchCode_TextMatchFragments(t *testing.T) {
+	// Setup mock search results with TextMatches populated
+	mockSearchResult := &github.CodeSearchResult{
+		Total:             github.Ptr(1),
+		IncompleteResults: github.Ptr(false),
+		CodeResults: []*github.CodeResult{
+			{
+				Name:       github.Ptr("main.go"),
+				Path:       github.Ptr("cmd/main.go"),
+				SHA:        github.Ptr("abc123"),
+				HTMLURL:    github.Ptr("https://github.com/owner/repo/blob/main/cmd/main.go"),
+				Repository: &github.Repository{Name: github.Ptr("repo"), FullName: github.Ptr("owner/repo")},
+				TextMatches: []*github.TextMatch{
+					{
+						Fragment: github.Ptr("func main() {\n\tfmt.Println(\"hello world\")\n}"),
+					},
+					{
+						Fragment: github.Ptr("import \"fmt\""),
+					},
+				},
+			},
+		},
+	}
+
+	mockedClient := mock.NewMockedHTTPClient(
+		mock.WithRequestMatchHandler(
+			mock.GetSearchCode,
+			expectQueryParams(t, map[string]string{
+				"q":        "fmt.Println language:go",
+				"page":     "1",
+				"per_page": "30",
+			}).andThen(
+				mockResponse(t, http.StatusOK, mockSearchResult),
+			),
+		),
+	)
+
+	client := github.NewClient(mockedClient)
+	_, handler := SearchCode(stubGetClientFn(client), translations.NullTranslationHelper)
+
+	request := createMCPRequest(map[string]interface{}{
+		"query": "fmt.Println language:go",
+	})
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+
+	textContent := getTextResult(t, result)
+
+	var returnedResult MinimalCodeSearchResult
+	err = json.Unmarshal([]byte(textContent.Text), &returnedResult)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, returnedResult.TotalCount)
+	require.Len(t, returnedResult.Items, 1)
+
+	item := returnedResult.Items[0]
+	assert.Equal(t, "main.go", item.Name)
+	assert.Equal(t, "cmd/main.go", item.Path)
+	assert.Equal(t, "owner/repo", item.Repository)
+
+	// Verify text match fragments are included
+	require.Len(t, item.TextMatches, 2)
+	assert.Equal(t, "func main() {\n\tfmt.Println(\"hello world\")\n}", item.TextMatches[0])
+	assert.Equal(t, "import \"fmt\"", item.TextMatches[1])
 }
 
 func Test_SearchUsers(t *testing.T) {
@@ -318,12 +384,12 @@ func Test_SearchUsers(t *testing.T) {
 
 	assert.Equal(t, "search_users", tool.Name)
 	assert.NotEmpty(t, tool.Description)
-	assert.Contains(t, tool.InputSchema.Properties, "q")
+	assert.Contains(t, tool.InputSchema.Properties, "query")
 	assert.Contains(t, tool.InputSchema.Properties, "sort")
 	assert.Contains(t, tool.InputSchema.Properties, "order")
 	assert.Contains(t, tool.InputSchema.Properties, "perPage")
 	assert.Contains(t, tool.InputSchema.Properties, "page")
-	assert.ElementsMatch(t, tool.InputSchema.Required, []string{"q"})
+	assert.ElementsMatch(t, tool.InputSchema.Required, []string{"query"})
 
 	// Setup mock search results
 	mockSearchResult := &github.UsersSearchResult{
@@ -376,7 +442,7 @@ func Test_SearchUsers(t *testing.T) {
 				),
 			),
 			requestArgs: map[string]interface{}{
-				"q":       "location:finland language:go",
+				"query":   "location:finland language:go",
 				"sort":    "followers",
 				"order":   "desc",
 				"page":    float64(1),
@@ -400,7 +466,7 @@ func Test_SearchUsers(t *testing.T) {
 				),
 			),
 			requestArgs: map[string]interface{}{
-				"q": "location:finland language:go",
+				"query": "location:finland language:go",
 			},
 			expectError:    false,
 			expectedResult: mockSearchResult,
@@ -417,7 +483,7 @@ func Test_SearchUsers(t *testing.T) {
 				),
 			),
 			requestArgs: map[string]interface{}{
-				"q": "invalid:query",
+				"query": "invalid:query",
 			},
 			expectError:    true,
 			expectedErrMsg: "failed to search users",
@@ -467,4 +533,82 @@ func Test_SearchUsers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_SearchCode_ZeroResults(t *testing.T) {
+	mockSearchResult := &github.CodeSearchResult{
+		Total:             github.Ptr(0),
+		IncompleteResults: github.Ptr(false),
+		CodeResults:       nil,
+	}
+
+	client := github.NewClient(mock.NewMockedHTTPClient(
+		mock.WithRequestMatchHandler(
+			mock.GetSearchCode,
+			mockResponse(t, http.StatusOK, mockSearchResult),
+		),
+	))
+	_, handler := SearchCode(stubGetClientFn(client), translations.NullTranslationHelper)
+
+	request := createMCPRequest(map[string]interface{}{
+		"query": "nonexistent_symbol_xyz org:squareup",
+	})
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+
+	textContent := getTextResult(t, result)
+
+	var returnedResult MinimalCodeSearchResult
+	err = json.Unmarshal([]byte(textContent.Text), &returnedResult)
+	require.NoError(t, err)
+	assert.Equal(t, 0, returnedResult.TotalCount)
+	assert.False(t, returnedResult.IncompleteResults)
+	assert.Empty(t, returnedResult.Items)
+}
+
+func Test_SearchCode_TextMatchHeaderSent(t *testing.T) {
+	// Verify that the Accept header includes the text-match media type
+	headerChecked := false
+	mockSearchResult := &github.CodeSearchResult{
+		Total:             github.Ptr(1),
+		IncompleteResults: github.Ptr(false),
+		CodeResults: []*github.CodeResult{
+			{
+				Name:       github.Ptr("main.go"),
+				Path:       github.Ptr("cmd/main.go"),
+				SHA:        github.Ptr("abc123"),
+				HTMLURL:    github.Ptr("https://github.com/owner/repo/blob/main/cmd/main.go"),
+				Repository: &github.Repository{FullName: github.Ptr("owner/repo")},
+			},
+		},
+	}
+
+	client := github.NewClient(mock.NewMockedHTTPClient(
+		mock.WithRequestMatchHandler(
+			mock.GetSearchCode,
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Assert the Accept header contains text-match media type
+				acceptHeader := r.Header.Get("Accept")
+				assert.Contains(t, acceptHeader, "application/vnd.github.v3.text-match+json",
+					"SearchCode must request text-match media type")
+				headerChecked = true
+
+				// Return the mock response
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(mockSearchResult)
+			}),
+		),
+	))
+	_, handler := SearchCode(stubGetClientFn(client), translations.NullTranslationHelper)
+
+	request := createMCPRequest(map[string]interface{}{
+		"query": "main org:owner",
+	})
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, headerChecked, "Accept header check must have been executed")
 }
