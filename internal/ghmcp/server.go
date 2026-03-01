@@ -216,6 +216,11 @@ type MCPServerConfig struct {
 	// ReadOnly indicates if we should only offer read-only tools
 	ReadOnly bool
 
+	// WritePrivateOnly restricts all write operations to private repositories only.
+	// When true, write tool handlers are wrapped with a visibility guard that blocks
+	// writes to public repositories. Has no effect when ReadOnly is also true.
+	WritePrivateOnly bool
+
 	// Installations maps organization names to GitHub App installation IDs
 	Installations map[string]int64
 
@@ -288,12 +293,21 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 	toolsets, err := github.InitToolsets(
 		enabledToolsets,
 		cfg.ReadOnly,
+		cfg.WritePrivateOnly,
 		getClient,
 		getGQLClient,
 		cfg.Translator,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize toolsets: %w", err)
+	}
+
+	if cfg.WritePrivateOnly {
+		if cfg.ReadOnly {
+			logrus.Warn("GITHUB_WRITE_PRIVATE_ONLY is set but has no effect because --read-only is also active. Write tools are not registered in read-only mode.")
+		} else {
+			logrus.Info("Write operations restricted to private repositories (GITHUB_WRITE_PRIVATE_ONLY=true)")
+		}
 	}
 
 	github.RegisterResources(ghServer, getClient, cfg.Translator)
@@ -330,6 +344,9 @@ type StdioServerConfig struct {
 	// ReadOnly indicates if we should only register read-only tools
 	ReadOnly bool
 
+	// WritePrivateOnly restricts all write operations to private repositories only.
+	WritePrivateOnly bool
+
 	// ExportTranslations indicates if we should export translations
 	// See: https://github.com/github/github-mcp-server?tab=readme-ov-file#i18n--overriding-descriptions
 	ExportTranslations bool
@@ -353,14 +370,15 @@ func RunStdioServer(cfg StdioServerConfig) error {
 	t, dumpTranslations := translations.TranslationHelper()
 
 	ghServer, err := NewMCPServer(MCPServerConfig{
-		Version:         cfg.Version,
-		Host:            cfg.Host,
-		Token:           cfg.Token,
-		EnabledToolsets: cfg.EnabledToolsets,
-		DynamicToolsets: cfg.DynamicToolsets,
-		ReadOnly:        cfg.ReadOnly,
-		Installations:   cfg.Installations,
-		Translator:      t,
+		Version:          cfg.Version,
+		Host:             cfg.Host,
+		Token:            cfg.Token,
+		EnabledToolsets:  cfg.EnabledToolsets,
+		DynamicToolsets:  cfg.DynamicToolsets,
+		ReadOnly:         cfg.ReadOnly,
+		WritePrivateOnly: cfg.WritePrivateOnly,
+		Installations:    cfg.Installations,
+		Translator:       t,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create MCP server: %w", err)

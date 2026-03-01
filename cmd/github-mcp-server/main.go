@@ -57,6 +57,7 @@ var (
 				EnabledToolsets:      enabledToolsets,
 				DynamicToolsets:      viper.GetBool("dynamic_toolsets"),
 				ReadOnly:             viper.GetBool("read-only"),
+				WritePrivateOnly:     viper.GetBool("write-private-only"),
 				ExportTranslations:   viper.GetBool("export-translations"),
 				EnableCommandLogging: viper.GetBool("enable-command-logging"),
 				LogFilePath:          viper.GetString("log-file"),
@@ -105,6 +106,7 @@ func init() {
 	rootCmd.PersistentFlags().StringSlice("toolsets", github.DefaultTools, "An optional comma separated list of groups of tools to allow with optional modes (e.g., 'repos:rw,issues:ro,users'), defaults to enabling all")
 	rootCmd.PersistentFlags().Bool("dynamic-toolsets", false, "Enable dynamic toolsets")
 	rootCmd.PersistentFlags().Bool("read-only", false, "Restrict the server to read-only operations")
+	rootCmd.PersistentFlags().Bool("write-private-only", false, "Restrict all write operations to private repositories only")
 	rootCmd.PersistentFlags().String("log-file", "", "Path to log file")
 	rootCmd.PersistentFlags().Bool("enable-command-logging", false, "When enabled, the server will log all command requests and responses to the log file")
 	rootCmd.PersistentFlags().Bool("export-translations", false, "Save translations to a JSON file")
@@ -121,6 +123,7 @@ func init() {
 	_ = viper.BindEnv("toolsets", "GITHUB_TOOLSETS")
 	_ = viper.BindPFlag("dynamic_toolsets", rootCmd.PersistentFlags().Lookup("dynamic-toolsets"))
 	_ = viper.BindPFlag("read-only", rootCmd.PersistentFlags().Lookup("read-only"))
+	_ = viper.BindPFlag("write-private-only", rootCmd.PersistentFlags().Lookup("write-private-only"))
 	_ = viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
 	_ = viper.BindPFlag("enable-command-logging", rootCmd.PersistentFlags().Lookup("enable-command-logging"))
 	_ = viper.BindPFlag("export-translations", rootCmd.PersistentFlags().Lookup("export-translations"))

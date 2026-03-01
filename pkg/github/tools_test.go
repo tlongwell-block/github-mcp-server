@@ -73,7 +73,7 @@ func TestInitToolsetsWithConfig(t *testing.T) {
 				return nil, nil
 			}
 
-			tsg, err := InitToolsetsWithConfig(tt.configs, tt.readOnly, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsetsWithConfig(tt.configs, tt.readOnly, false, getClient, getGQLClient, mockTranslator)
 
 			if tt.wantErr {
 				if err == nil {
@@ -165,7 +165,7 @@ func TestInitToolsets_BackwardCompatibility(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tsg, err := InitToolsets(tt.passedToolsets, tt.readOnly, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsets(tt.passedToolsets, tt.readOnly, false, getClient, getGQLClient, mockTranslator)
 
 			if tt.wantErr {
 				if err == nil {
@@ -255,7 +255,7 @@ func TestToolsetModeFiltering(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tsg, err := InitToolsetsWithConfig(tt.configs, false, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsetsWithConfig(tt.configs, false, false, getClient, getGQLClient, mockTranslator)
 			if err != nil {
 				t.Fatalf("InitToolsetsWithConfig() error: %v", err)
 			}
@@ -339,7 +339,7 @@ func TestContextToolsetIntegration(t *testing.T) {
 		{Name: "repos", Mode: toolsets.ReadOnly},
 	}
 
-	tsg, err := InitToolsetsWithConfig(configs, false, getClient, getGQLClient, mockTranslator)
+	tsg, err := InitToolsetsWithConfig(configs, false, false, getClient, getGQLClient, mockTranslator)
 	if err != nil {
 		t.Fatalf("InitToolsetsWithConfig() error: %v", err)
 	}
