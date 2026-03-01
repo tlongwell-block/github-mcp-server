@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -138,6 +139,27 @@ func Test_WritePrivateOnlyGuard(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_WritePrivateOnlyGuard_GetClientFailure(t *testing.T) {
+	// Test that the guard fails closed when getClient returns an error
+	getClient := func(_ context.Context, _ string) (*github.Client, error) {
+		return nil, fmt.Errorf("auth failure: no valid credentials")
+	}
+
+	tool := dummyTool("test_write_tool")
+	_, guardedHandler := WritePrivateOnlyGuard(getClient, tool, dummyWriteHandler)
+
+	request := createMCPRequest(map[string]interface{}{
+		"owner": "myorg",
+		"repo":  "some-repo",
+	})
+	result, err := guardedHandler(context.Background(), request)
+	require.NoError(t, err)
+	assert.True(t, result.IsError, "expected blocked result when getClient fails")
+
+	textContent := getTextResult(t, result)
+	assert.Contains(t, textContent.Text, "unable to verify repository visibility")
 }
 
 func Test_CreateRepositoryPrivateOnlyGuard(t *testing.T) {
