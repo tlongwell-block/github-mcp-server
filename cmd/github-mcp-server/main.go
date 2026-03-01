@@ -124,6 +124,7 @@ func init() {
 	_ = viper.BindPFlag("dynamic_toolsets", rootCmd.PersistentFlags().Lookup("dynamic-toolsets"))
 	_ = viper.BindPFlag("read-only", rootCmd.PersistentFlags().Lookup("read-only"))
 	_ = viper.BindPFlag("write-private-only", rootCmd.PersistentFlags().Lookup("write-private-only"))
+	_ = viper.BindEnv("write-private-only", "GITHUB_WRITE_PRIVATE_ONLY")
 	_ = viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
 	_ = viper.BindPFlag("enable-command-logging", rootCmd.PersistentFlags().Lookup("enable-command-logging"))
 	_ = viper.BindPFlag("export-translations", rootCmd.PersistentFlags().Lookup("export-translations"))
