@@ -73,7 +73,7 @@ func TestInitToolsetsWithConfig(t *testing.T) {
 				return nil, nil
 			}
 
-			tsg, err := InitToolsetsWithConfig(tt.configs, tt.readOnly, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsetsWithConfig(tt.configs, tt.readOnly, false, getClient, getGQLClient, mockTranslator)
 
 			if tt.wantErr {
 				if err == nil {
@@ -165,7 +165,7 @@ func TestInitToolsets_BackwardCompatibility(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tsg, err := InitToolsets(tt.passedToolsets, tt.readOnly, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsets(tt.passedToolsets, tt.readOnly, false, getClient, getGQLClient, mockTranslator)
 
 			if tt.wantErr {
 				if err == nil {
@@ -255,7 +255,7 @@ func TestToolsetModeFiltering(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tsg, err := InitToolsetsWithConfig(tt.configs, false, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsetsWithConfig(tt.configs, false, false, getClient, getGQLClient, mockTranslator)
 			if err != nil {
 				t.Fatalf("InitToolsetsWithConfig() error: %v", err)
 			}
@@ -339,7 +339,7 @@ func TestContextToolsetIntegration(t *testing.T) {
 		{Name: "repos", Mode: toolsets.ReadOnly},
 	}
 
-	tsg, err := InitToolsetsWithConfig(configs, false, getClient, getGQLClient, mockTranslator)
+	tsg, err := InitToolsetsWithConfig(configs, false, false, getClient, getGQLClient, mockTranslator)
 	if err != nil {
 		t.Fatalf("InitToolsetsWithConfig() error: %v", err)
 	}
@@ -378,4 +378,78 @@ func TestContextToolsetIntegration(t *testing.T) {
 	}
 
 	t.Logf("Context toolset has %d active tools", len(activeTools))
+}
+
+func TestWritePrivateOnlyGuardWiring(t *testing.T) {
+	// Verify that when writePrivateOnly=true, write tools are wrapped with guards
+	// and that when writePrivateOnly=false, they are not.
+	mockTranslator := func(key, fallback string) string {
+		return fallback
+	}
+	getClient := func(ctx context.Context, _ string) (*github.Client, error) {
+		return github.NewClient(nil), nil
+	}
+	getGQLClient := func(ctx context.Context, _ string) (*githubv4.Client, error) {
+		return nil, nil
+	}
+
+	configs := []toolsets.ToolsetConfig{
+		{Name: "all", Mode: toolsets.ReadWrite},
+	}
+
+	// Initialize with writePrivateOnly=false
+	tsgOff, err := InitToolsetsWithConfig(configs, false, false, getClient, getGQLClient, mockTranslator)
+	if err != nil {
+		t.Fatalf("InitToolsetsWithConfig(writePrivateOnly=false) error: %v", err)
+	}
+
+	// Initialize with writePrivateOnly=true
+	tsgOn, err := InitToolsetsWithConfig(configs, false, true, getClient, getGQLClient, mockTranslator)
+	if err != nil {
+		t.Fatalf("InitToolsetsWithConfig(writePrivateOnly=true) error: %v", err)
+	}
+
+	// Both should have the same number of toolsets
+	if len(tsgOff.Toolsets) != len(tsgOn.Toolsets) {
+		t.Errorf("Expected same number of toolsets, got %d vs %d", len(tsgOff.Toolsets), len(tsgOn.Toolsets))
+	}
+
+	// Both should have the same tools (write tools are still registered, just wrapped)
+	for name, tsOff := range tsgOff.Toolsets {
+		tsOn, exists := tsgOn.Toolsets[name]
+		if !exists {
+			t.Errorf("Toolset %s missing from writePrivateOnly=true", name)
+			continue
+		}
+		offTools := tsOff.GetActiveTools()
+		onTools := tsOn.GetActiveTools()
+		if len(offTools) != len(onTools) {
+			t.Errorf("Toolset %s: expected %d tools, got %d with writePrivateOnly=true",
+				name, len(offTools), len(onTools))
+		}
+	}
+
+	// Verify that fork_repository is blocked when writePrivateOnly=true
+	// by calling the handler directly
+	repoToolset := tsgOn.Toolsets["repos"]
+	if repoToolset == nil {
+		t.Fatal("repos toolset not found")
+	}
+	for _, tool := range repoToolset.GetActiveTools() {
+		if tool.Tool.Name == "fork_repository" {
+			result, err := tool.Handler(context.Background(), createMCPRequest(map[string]interface{}{
+				"owner": "testowner",
+				"repo":  "testrepo",
+			}))
+			if err != nil {
+				t.Fatalf("fork_repository handler returned error: %v", err)
+			}
+			// Should be blocked
+			if result == nil || !result.IsError {
+				t.Error("Expected fork_repository to be blocked when writePrivateOnly=true")
+			}
+			return
+		}
+	}
+	t.Error("fork_repository tool not found in repos toolset")
 }

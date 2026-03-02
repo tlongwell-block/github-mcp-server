@@ -7,6 +7,7 @@ import (
 	"github.com/github/github-mcp-server/pkg/toolsets"
 	"github.com/github/github-mcp-server/pkg/translations"
 	"github.com/google/go-github/v69/github"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/shurcooL/githubv4"
 )
@@ -16,19 +17,40 @@ type GetGQLClientFn func(ctx context.Context, owner string) (*githubv4.Client, e
 
 var DefaultTools = []string{"all"}
 
-func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
+func InitToolsets(passedToolsets []string, readOnly bool, writePrivateOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
 	// Parse toolset configurations from the passed toolsets
 	configs, err := toolsets.ParseToolsetConfigFromSlice(passedToolsets)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse toolset configuration: %w", err)
 	}
 
-	return InitToolsetsWithConfig(configs, readOnly, getClient, getGQLClient, t)
+	return InitToolsetsWithConfig(configs, readOnly, writePrivateOnly, getClient, getGQLClient, t)
 }
 
-func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
+func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, writePrivateOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
 	// Create a new toolset group
 	tsg := toolsets.NewToolsetGroup(readOnly)
+
+	// Helper functions to conditionally wrap write tool handlers with guards.
+	// When writePrivateOnly=false, these are no-ops that return the tool and handler unchanged.
+	guardWrite := func(tool mcp.Tool, handler server.ToolHandlerFunc) (mcp.Tool, server.ToolHandlerFunc) {
+		if writePrivateOnly {
+			return WritePrivateOnlyGuard(getClient, tool, handler)
+		}
+		return tool, handler
+	}
+	guardCreate := func(tool mcp.Tool, handler server.ToolHandlerFunc) (mcp.Tool, server.ToolHandlerFunc) {
+		if writePrivateOnly {
+			return CreateRepositoryPrivateOnlyGuard(tool, handler)
+		}
+		return tool, handler
+	}
+	guardFork := func(tool mcp.Tool, handler server.ToolHandlerFunc) (mcp.Tool, server.ToolHandlerFunc) {
+		if writePrivateOnly {
+			return ForkRepositoryPrivateOnlyGuard(tool, handler)
+		}
+		return tool, handler
+	}
 
 	// Define all available features with their default state (disabled)
 	// Create toolsets
@@ -44,12 +66,12 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, get
 			toolsets.NewServerTool(GetTag(getClient, t)),
 		).
 		AddWriteTools(
-			toolsets.NewServerTool(CreateOrUpdateFile(getClient, t)),
-			toolsets.NewServerTool(CreateRepository(getClient, t)),
-			toolsets.NewServerTool(ForkRepository(getClient, t)),
-			toolsets.NewServerTool(CreateBranch(getClient, t)),
-			toolsets.NewServerTool(PushFiles(getClient, t)),
-			toolsets.NewServerTool(DeleteFile(getClient, t)),
+			toolsets.NewServerTool(guardWrite(CreateOrUpdateFile(getClient, t))),
+			toolsets.NewServerTool(guardCreate(CreateRepository(getClient, t))),
+			toolsets.NewServerTool(guardFork(ForkRepository(getClient, t))),
+			toolsets.NewServerTool(guardWrite(CreateBranch(getClient, t))),
+			toolsets.NewServerTool(guardWrite(PushFiles(getClient, t))),
+			toolsets.NewServerTool(guardWrite(DeleteFile(getClient, t))),
 		)
 	issues := toolsets.NewToolset("issues", "GitHub Issues related tools").
 		AddReadTools(
@@ -59,9 +81,9 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, get
 			toolsets.NewServerTool(GetIssueComments(getClient, t)),
 		).
 		AddWriteTools(
-			toolsets.NewServerTool(CreateIssue(getClient, t)),
-			toolsets.NewServerTool(AddIssueComment(getClient, t)),
-			toolsets.NewServerTool(UpdateIssue(getClient, t)),
+			toolsets.NewServerTool(guardWrite(CreateIssue(getClient, t))),
+			toolsets.NewServerTool(guardWrite(AddIssueComment(getClient, t))),
+			toolsets.NewServerTool(guardWrite(UpdateIssue(getClient, t))),
 		)
 	users := toolsets.NewToolset("users", "GitHub User related tools").
 		AddReadTools(
@@ -78,18 +100,18 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, get
 			toolsets.NewServerTool(GetPullRequestDiff(getClient, t)),
 		).
 		AddWriteTools(
-			toolsets.NewServerTool(MergePullRequest(getClient, t)),
-			toolsets.NewServerTool(UpdatePullRequestBranch(getClient, t)),
-			toolsets.NewServerTool(CreatePullRequest(getClient, t)),
-			toolsets.NewServerTool(UpdatePullRequest(getClient, t)),
-			toolsets.NewServerTool(RequestCopilotReview(getClient, t)),
+			toolsets.NewServerTool(guardWrite(MergePullRequest(getClient, t))),
+			toolsets.NewServerTool(guardWrite(UpdatePullRequestBranch(getClient, t))),
+			toolsets.NewServerTool(guardWrite(CreatePullRequest(getClient, t))),
+			toolsets.NewServerTool(guardWrite(UpdatePullRequest(getClient, t))),
+			toolsets.NewServerTool(guardWrite(RequestCopilotReview(getClient, t))),
 
 			// Reviews
-			toolsets.NewServerTool(CreateAndSubmitPullRequestReview(getGQLClient, t)),
-			toolsets.NewServerTool(CreatePendingPullRequestReview(getGQLClient, t)),
-			toolsets.NewServerTool(AddPullRequestReviewCommentToPendingReview(getGQLClient, t)),
-			toolsets.NewServerTool(SubmitPendingPullRequestReview(getGQLClient, t)),
-			toolsets.NewServerTool(DeletePendingPullRequestReview(getGQLClient, t)),
+			toolsets.NewServerTool(guardWrite(CreateAndSubmitPullRequestReview(getGQLClient, t))),
+			toolsets.NewServerTool(guardWrite(CreatePendingPullRequestReview(getGQLClient, t))),
+			toolsets.NewServerTool(guardWrite(AddPullRequestReviewCommentToPendingReview(getGQLClient, t))),
+			toolsets.NewServerTool(guardWrite(SubmitPendingPullRequestReview(getGQLClient, t))),
+			toolsets.NewServerTool(guardWrite(DeletePendingPullRequestReview(getGQLClient, t))),
 		)
 	codeSecurity := toolsets.NewToolset("code_security", "Code security related tools, such as GitHub Code Scanning").
 		AddReadTools(
