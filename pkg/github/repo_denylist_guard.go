@@ -56,8 +56,10 @@ func SearchDenylistGuard(denylist *RepoDenylist, queryParam string, tool mcp.Too
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// Block if the query targets a denied repo via "repo:owner/repo"
-		if info := extractRepoFromQuery(query); info.owner != "" && info.repo != "" {
+		// Block if any "repo:owner/repo" qualifier in the query targets a denied repo.
+		// All qualifiers are checked to prevent bypass via multiple repo: qualifiers
+		// (e.g. "repo:allowed/repo repo:denied/repo").
+		for _, info := range extractAllReposFromQuery(query) {
 			if denylist.IsDenied(info.owner, info.repo) {
 				logrus.Warnf("Search blocked: %s targeting denied repo %s/%s (GITHUB_REPO_DENYLIST)",
 					tool.Name, info.owner, info.repo)
@@ -96,7 +98,7 @@ func DenylistResourceGuard(denylist *RepoDenylist, handler server.ResourceTempla
 				if denylist.IsDenied(owner, repo) {
 					logrus.Warnf("Resource access blocked: %s/%s is on the denylist (GITHUB_REPO_DENYLIST)", owner, repo)
 					return nil, fmt.Errorf(
-						"access blocked: %s/%s is on the repository denylist. "+
+						"Access blocked: %s/%s is on the repository denylist. "+
 							"Contact the administrator if you believe this is an error.",
 						owner, repo,
 					)

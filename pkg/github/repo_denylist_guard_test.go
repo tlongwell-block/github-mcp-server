@@ -130,6 +130,13 @@ func Test_SearchDenylistGuard(t *testing.T) {
 			query:      "repositories about authentication",
 		},
 		{
+			name:           "blocks second repo: qualifier when first is allowed (multi-qualifier bypass)",
+			queryParam:     "q",
+			query:          "repo:squareup/goosed-slackbot repo:squareup/infosec-minesweeper something",
+			expectBlocked:  true,
+			expectedErrMsg: "Search blocked: the query targets squareup/infosec-minesweeper",
+		},
+		{
 			name:           "blocks user: qualifier targeting denied org",
 			queryParam:     "q",
 			query:          "user:afterpaytouch something",
@@ -213,7 +220,7 @@ func Test_DenylistResourceGuard(t *testing.T) {
 			contents, err := guarded(context.Background(), req)
 			if tc.expectBlocked {
 				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "access blocked")
+				assert.Contains(t, err.Error(), "Access blocked")
 				assert.Nil(t, contents)
 			} else {
 				assert.NoError(t, err)

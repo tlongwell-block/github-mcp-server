@@ -105,7 +105,7 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, wri
 		)
 	users := toolsets.NewToolset("users", "GitHub User related tools").
 		AddReadTools(
-			toolsets.NewServerTool(SearchUsers(getClient, t)),
+			toolsets.NewServerTool(guardSearchDenylist("q")(SearchUsers(getClient, t))),
 		)
 	pullRequests := toolsets.NewToolset("pull_requests", "GitHub Pull Request related tools").
 		AddReadTools(
