@@ -221,6 +221,11 @@ type MCPServerConfig struct {
 	// writes to public repositories. Has no effect when ReadOnly is also true.
 	WritePrivateOnly bool
 
+	// RepoDenylist is a list of "owner/repo" patterns (or "owner/*" wildcards) for
+	// repositories that must not be accessible via any tool or resource. Both reads
+	// and writes are blocked. Configured via GITHUB_REPO_DENYLIST.
+	RepoDenylist []string
+
 	// Installations maps organization names to GitHub App installation IDs
 	Installations map[string]int64
 
@@ -289,11 +294,18 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 	getClient := clientFactory.GetClientFn()
 	getGQLClient := clientFactory.GetGQLClientFn()
 
+	// Parse repo denylist
+	denylist := github.NewRepoDenylist(cfg.RepoDenylist)
+	if !denylist.IsEmpty() {
+		logrus.Infof("Repository denylist active: %d entries (GITHUB_REPO_DENYLIST)", len(cfg.RepoDenylist))
+	}
+
 	// Create default toolsets
 	toolsets, err := github.InitToolsets(
 		enabledToolsets,
 		cfg.ReadOnly,
 		cfg.WritePrivateOnly,
+		denylist,
 		getClient,
 		getGQLClient,
 		cfg.Translator,
@@ -310,7 +322,7 @@ func NewMCPServer(cfg MCPServerConfig) (*server.MCPServer, error) {
 		}
 	}
 
-	github.RegisterResources(ghServer, getClient, cfg.Translator)
+	github.RegisterResources(ghServer, getClient, denylist, cfg.Translator)
 
 	// Register the tools with the server
 	toolsets.RegisterTools(ghServer)
@@ -347,6 +359,9 @@ type StdioServerConfig struct {
 	// WritePrivateOnly restricts all write operations to private repositories only.
 	WritePrivateOnly bool
 
+	// RepoDenylist is a list of "owner/repo" patterns (or "owner/*" wildcards) to block.
+	RepoDenylist []string
+
 	// ExportTranslations indicates if we should export translations
 	// See: https://github.com/github/github-mcp-server?tab=readme-ov-file#i18n--overriding-descriptions
 	ExportTranslations bool
@@ -377,6 +392,7 @@ func RunStdioServer(cfg StdioServerConfig) error {
 		DynamicToolsets:  cfg.DynamicToolsets,
 		ReadOnly:         cfg.ReadOnly,
 		WritePrivateOnly: cfg.WritePrivateOnly,
+		RepoDenylist:     cfg.RepoDenylist,
 		Installations:    cfg.Installations,
 		Translator:       t,
 	})
