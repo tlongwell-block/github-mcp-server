@@ -73,7 +73,7 @@ func TestInitToolsetsWithConfig(t *testing.T) {
 				return nil, nil
 			}
 
-			tsg, err := InitToolsetsWithConfig(tt.configs, tt.readOnly, false, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsetsWithConfig(tt.configs, tt.readOnly, false, nil, getClient, getGQLClient, mockTranslator)
 
 			if tt.wantErr {
 				if err == nil {
@@ -165,7 +165,7 @@ func TestInitToolsets_BackwardCompatibility(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tsg, err := InitToolsets(tt.passedToolsets, tt.readOnly, false, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsets(tt.passedToolsets, tt.readOnly, false, nil, getClient, getGQLClient, mockTranslator)
 
 			if tt.wantErr {
 				if err == nil {
@@ -255,7 +255,7 @@ func TestToolsetModeFiltering(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tsg, err := InitToolsetsWithConfig(tt.configs, false, false, getClient, getGQLClient, mockTranslator)
+			tsg, err := InitToolsetsWithConfig(tt.configs, false, false, nil, getClient, getGQLClient, mockTranslator)
 			if err != nil {
 				t.Fatalf("InitToolsetsWithConfig() error: %v", err)
 			}
@@ -339,7 +339,7 @@ func TestContextToolsetIntegration(t *testing.T) {
 		{Name: "repos", Mode: toolsets.ReadOnly},
 	}
 
-	tsg, err := InitToolsetsWithConfig(configs, false, false, getClient, getGQLClient, mockTranslator)
+	tsg, err := InitToolsetsWithConfig(configs, false, false, nil, getClient, getGQLClient, mockTranslator)
 	if err != nil {
 		t.Fatalf("InitToolsetsWithConfig() error: %v", err)
 	}
@@ -398,13 +398,13 @@ func TestWritePrivateOnlyGuardWiring(t *testing.T) {
 	}
 
 	// Initialize with writePrivateOnly=false
-	tsgOff, err := InitToolsetsWithConfig(configs, false, false, getClient, getGQLClient, mockTranslator)
+	tsgOff, err := InitToolsetsWithConfig(configs, false, false, nil, getClient, getGQLClient, mockTranslator)
 	if err != nil {
 		t.Fatalf("InitToolsetsWithConfig(writePrivateOnly=false) error: %v", err)
 	}
 
 	// Initialize with writePrivateOnly=true
-	tsgOn, err := InitToolsetsWithConfig(configs, false, true, getClient, getGQLClient, mockTranslator)
+	tsgOn, err := InitToolsetsWithConfig(configs, false, true, nil, getClient, getGQLClient, mockTranslator)
 	if err != nil {
 		t.Fatalf("InitToolsetsWithConfig(writePrivateOnly=true) error: %v", err)
 	}
@@ -452,4 +452,66 @@ func TestWritePrivateOnlyGuardWiring(t *testing.T) {
 		}
 	}
 	t.Error("fork_repository tool not found in repos toolset")
+}
+
+func TestRepoDenylistGuardWiring(t *testing.T) {
+	mockTranslator := func(key, fallback string) string { return fallback }
+	getClient := func(_ context.Context, _ string) (*github.Client, error) {
+		return github.NewClient(nil), nil
+	}
+	getGQLClient := func(_ context.Context, _ string) (*githubv4.Client, error) {
+		return nil, nil
+	}
+
+	configs := []toolsets.ToolsetConfig{
+		{Name: "all", Mode: toolsets.ReadWrite},
+	}
+
+	denylist := NewRepoDenylist([]string{"squareup/infosec-minesweeper"})
+
+	// Both should initialize without error
+	tsgOff, err := InitToolsetsWithConfig(configs, false, false, nil, getClient, getGQLClient, mockTranslator)
+	if err != nil {
+		t.Fatalf("InitToolsetsWithConfig(denylist=nil) error: %v", err)
+	}
+	tsgOn, err := InitToolsetsWithConfig(configs, false, false, denylist, getClient, getGQLClient, mockTranslator)
+	if err != nil {
+		t.Fatalf("InitToolsetsWithConfig(denylist=set) error: %v", err)
+	}
+
+	// Both should have the same number of tools (guards don't add/remove tools)
+	for name, tsOff := range tsgOff.Toolsets {
+		tsOn, exists := tsgOn.Toolsets[name]
+		if !exists {
+			t.Errorf("Toolset %s missing when denylist is set", name)
+			continue
+		}
+		if len(tsOff.GetActiveTools()) != len(tsOn.GetActiveTools()) {
+			t.Errorf("Toolset %s: tool count changed with denylist (off=%d, on=%d)",
+				name, len(tsOff.GetActiveTools()), len(tsOn.GetActiveTools()))
+		}
+	}
+
+	// Verify get_file_contents is blocked for denied repo when denylist is set
+	repoToolset := tsgOn.Toolsets["repos"]
+	if repoToolset == nil {
+		t.Fatal("repos toolset not found")
+	}
+	for _, tool := range repoToolset.GetActiveTools() {
+		if tool.Tool.Name == "get_file_contents" {
+			result, err := tool.Handler(context.Background(), createMCPRequest(map[string]interface{}{
+				"owner": "squareup",
+				"repo":  "infosec-minesweeper",
+				"path":  "README.md",
+			}))
+			if err != nil {
+				t.Fatalf("get_file_contents handler returned error: %v", err)
+			}
+			if result == nil || !result.IsError {
+				t.Error("Expected get_file_contents to be blocked for denied repo")
+			}
+			return
+		}
+	}
+	t.Error("get_file_contents tool not found in repos toolset")
 }

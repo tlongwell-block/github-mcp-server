@@ -47,6 +47,13 @@ var (
 				return fmt.Errorf("failed to unmarshal toolsets: %w", err)
 			}
 
+			// Same approach as toolsets: viper.GetStringSlice doesn't handle comma-separated
+			// env vars correctly, so UnmarshalKey is used instead.
+			var repoDenylist []string
+			if err := viper.UnmarshalKey("repo-denylist", &repoDenylist); err != nil {
+				return fmt.Errorf("failed to unmarshal repo denylist: %w", err)
+			}
+
 			// Parse multi-org installations
 			installations := parseOrgInstallations()
 
@@ -58,6 +65,7 @@ var (
 				DynamicToolsets:      viper.GetBool("dynamic_toolsets"),
 				ReadOnly:             viper.GetBool("read-only"),
 				WritePrivateOnly:     viper.GetBool("write-private-only"),
+				RepoDenylist:         repoDenylist,
 				ExportTranslations:   viper.GetBool("export-translations"),
 				EnableCommandLogging: viper.GetBool("enable-command-logging"),
 				LogFilePath:          viper.GetString("log-file"),
@@ -107,6 +115,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("dynamic-toolsets", false, "Enable dynamic toolsets")
 	rootCmd.PersistentFlags().Bool("read-only", false, "Restrict the server to read-only operations")
 	rootCmd.PersistentFlags().Bool("write-private-only", false, "Restrict all write operations to private repositories only")
+	rootCmd.PersistentFlags().StringSlice("repo-denylist", nil, "Comma-separated list of owner/repo patterns to block all access to (e.g. 'squareup/secret-repo,squareup/*')")
 	rootCmd.PersistentFlags().String("log-file", "", "Path to log file")
 	rootCmd.PersistentFlags().Bool("enable-command-logging", false, "When enabled, the server will log all command requests and responses to the log file")
 	rootCmd.PersistentFlags().Bool("export-translations", false, "Save translations to a JSON file")
@@ -125,6 +134,8 @@ func init() {
 	_ = viper.BindPFlag("read-only", rootCmd.PersistentFlags().Lookup("read-only"))
 	_ = viper.BindPFlag("write-private-only", rootCmd.PersistentFlags().Lookup("write-private-only"))
 	_ = viper.BindEnv("write-private-only", "GITHUB_WRITE_PRIVATE_ONLY")
+	_ = viper.BindPFlag("repo-denylist", rootCmd.PersistentFlags().Lookup("repo-denylist"))
+	_ = viper.BindEnv("repo-denylist", "GITHUB_REPO_DENYLIST")
 	_ = viper.BindPFlag("log-file", rootCmd.PersistentFlags().Lookup("log-file"))
 	_ = viper.BindPFlag("enable-command-logging", rootCmd.PersistentFlags().Lookup("enable-command-logging"))
 	_ = viper.BindPFlag("export-translations", rootCmd.PersistentFlags().Lookup("export-translations"))
