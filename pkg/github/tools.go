@@ -77,7 +77,7 @@ func InitToolsetsWithConfig(configs []toolsets.ToolsetConfig, readOnly bool, wri
 			toolsets.NewServerTool(guardSearchDenylist("query")(SearchRepositories(getClient, t))),
 			toolsets.NewServerTool(guardDenylist(GetFileContents(getClient, t))),
 			toolsets.NewServerTool(guardDenylist(ListCommits(getClient, t))),
-			toolsets.NewServerTool(guardSearchDenylist("q")(guardDenylist(SearchCode(getClient, t)))),
+			toolsets.NewServerTool(guardSearchDenylist("q")(SearchCode(getClient, t))),
 			toolsets.NewServerTool(guardDenylist(GetCommit(getClient, t))),
 			toolsets.NewServerTool(guardDenylist(ListBranches(getClient, t))),
 			toolsets.NewServerTool(guardDenylist(ListTags(getClient, t))),
