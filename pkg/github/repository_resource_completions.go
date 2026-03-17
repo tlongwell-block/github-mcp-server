@@ -25,7 +25,9 @@ var RepositoryResourceArgumentResolvers = map[string]CompleteHandler{
 }
 
 // RepositoryResourceCompletionHandler returns a CompletionHandlerFunc for repository resource completions.
-func RepositoryResourceCompletionHandler(getClient GetClientFn) func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+// The denylist parameter blocks completions for denied repos (branches, tags, tree paths).
+// Pass nil to skip denylist enforcement.
+func RepositoryResourceCompletionHandler(getClient GetClientFn, denylist *RepoDenylist) func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 	return func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 		if req.Params.Ref.Type != "ref/resource" {
 			return nil, nil // Not a resource completion
@@ -38,6 +40,44 @@ func RepositoryResourceCompletionHandler(getClient GetClientFn) func(ctx context
 			resolved = req.Params.Context.Arguments
 		} else {
 			resolved = map[string]string{}
+		}
+
+		// Inject owner into context so MultiOrgDeps routes to the correct
+		// org's GitHub App installation. For tools/call this is done by
+		// OwnerExtractMiddleware; for completions the owner comes from the
+		// resolved arguments, not tool call params.
+		if owner := resolved["owner"]; owner != "" {
+			ctx = ContextWithOwner(ctx, owner)
+		}
+
+		// Enforce denylist on completion paths. Completions call GitHub APIs
+		// (branches, tags, tree) which would leak data for denied repos.
+		if denylist != nil && !denylist.IsEmpty() {
+			owner := resolved["owner"]
+			repo := resolved["repo"]
+
+			// Check org wildcard (owner/*) — blocks even when repo is not yet
+			// resolved (e.g., during repo completion for a denied org).
+			if owner != "" && denylist.IsOrgDenied(owner) {
+				return &mcp.CompleteResult{
+					Completion: mcp.CompletionResultDetails{
+						Values:  []string{},
+						Total:   0,
+						HasMore: false,
+					},
+				}, nil
+			}
+
+			// Check exact match (owner/repo) when both are resolved.
+			if owner != "" && repo != "" && denylist.IsDenied(owner, repo) {
+				return &mcp.CompleteResult{
+					Completion: mcp.CompletionResultDetails{
+						Values:  []string{},
+						Total:   0,
+						HasMore: false,
+					},
+				}, nil
+			}
 		}
 
 		client, err := getClient(ctx)
@@ -59,6 +99,35 @@ func RepositoryResourceCompletionHandler(getClient GetClientFn) func(ctx context
 		}
 		if len(values) > 100 {
 			values = values[:100]
+		}
+
+		// Post-resolver denylist filtering: remove denied owners from suggestions.
+		// This catches owners that pass the pre-resolver check (which only blocks
+		// when owner is already resolved) but appear in the resolver's results.
+		if denylist != nil && !denylist.IsEmpty() && argName == "owner" {
+			filtered := values[:0]
+			for _, v := range values {
+				if !denylist.IsOrgDenied(v) {
+					filtered = append(filtered, v)
+				}
+			}
+			values = filtered
+		}
+
+		// Post-resolver denylist filtering: remove denied repos from suggestions.
+		// This catches repos that pass the pre-resolver check (which only blocks
+		// when both owner and repo are resolved) but appear in the resolver's results.
+		if denylist != nil && !denylist.IsEmpty() && argName == "repo" {
+			owner := resolved["owner"]
+			if owner != "" {
+				filtered := values[:0]
+				for _, v := range values {
+					if !denylist.IsDenied(owner, v) {
+						filtered = append(filtered, v)
+					}
+				}
+				values = filtered
+			}
 		}
 
 		return &mcp.CompleteResult{

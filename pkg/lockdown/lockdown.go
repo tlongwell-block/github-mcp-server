@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/muesli/cache2go"
@@ -42,8 +43,9 @@ const (
 )
 
 var (
-	instance   *RepoAccessCache
-	instanceMu sync.Mutex
+	instance    *RepoAccessCache
+	instanceMu  sync.Mutex
+	newCacheSeq atomic.Int64 // monotonic counter for unique default cache names
 )
 
 // RepoAccessOption configures RepoAccessCache at construction time.
@@ -72,6 +74,32 @@ func WithCacheName(name string) RepoAccessOption {
 			c.cache = cache2go.Cache(name)
 		}
 	}
+}
+
+// NewRepoAccessCache creates a new, independent RepoAccessCache.
+// Unlike GetInstance, this does NOT use the package-level singleton — each call
+// returns a distinct cache. Use this when multiple caches are needed (e.g.,
+// multi-org GitHub App auth where each installation has its own GQL client).
+//
+// A unique cache table name is generated automatically via a monotonic counter.
+// Use WithCacheName to override the default name with a stable, human-readable
+// identifier (e.g., based on installation ID) for easier debugging.
+func NewRepoAccessCache(client *githubv4.Client, opts ...RepoAccessOption) *RepoAccessCache {
+	seq := newCacheSeq.Add(1)
+	c := &RepoAccessCache{
+		client: client,
+		cache:  cache2go.Cache(fmt.Sprintf("%s-new-%d", defaultRepoAccessCacheKey, seq)),
+		ttl:    defaultRepoAccessTTL,
+		trustedBotLogins: map[string]struct{}{
+			"copilot": {},
+		},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(c)
+		}
+	}
+	return c
 }
 
 // GetInstance returns the singleton instance of RepoAccessCache.

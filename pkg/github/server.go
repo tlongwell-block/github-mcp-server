@@ -74,16 +74,45 @@ type MCPServerConfig struct {
 
 	// Additional server options to apply
 	ServerOptions []MCPServerOption
+
+	// GitHub App authentication
+	AppID          int64
+	InstallationID int64  // default installation; folded into Installations["_default"] by CLI
+	PrivateKey     []byte // resolved private key bytes (from file or content)
+
+	// Multi-org installations (org name → installation ID)
+	Installations map[string]int64
+
+	// WritePrivateOnly restricts repository write operations to private repos only.
+	// When true, any tool with ReadOnlyHint=false that takes owner+repo params will
+	// have its target repo's visibility checked before execution. Public repos are
+	// blocked. Note: this also blocks star/unstar operations on public repos, since
+	// those tools are not marked ReadOnlyHint=true. This is intentional — the guard
+	// is conservative by design.
+	WritePrivateOnly bool
+
+	// Repo denylist entries (parsed from GITHUB_REPO_DENYLIST)
+	RepoDenylistEntries []string
+
+	// Pre-built repo denylist (constructed once by the caller).
+	// When non-nil, used directly instead of building from RepoDenylistEntries.
+	Denylist *RepoDenylist
 }
 
 type MCPServerOption func(*mcp.ServerOptions)
 
 func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependencies, inv *inventory.Inventory, middleware ...mcp.Middleware) (*mcp.Server, error) {
+	// Use pre-built denylist if provided, otherwise construct from entries.
+	denylist := cfg.Denylist
+	if denylist == nil {
+		denylist = NewRepoDenylist(cfg.RepoDenylistEntries)
+	}
+
 	// Create the MCP server
 	serverOpts := &mcp.ServerOptions{
 		Instructions:      inv.Instructions(),
 		Logger:            cfg.Logger,
-		CompletionHandler: CompletionsHandler(deps.GetClient),
+		CompletionHandler: CompletionsHandler(deps.GetClient, denylist),
 	}
 
 	// Apply any additional server options
@@ -103,8 +132,11 @@ func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependenci
 
 	ghServer := NewServer(cfg.Version, cfg.Translator("SERVER_NAME", "github-mcp-server"), cfg.Translator("SERVER_TITLE", "GitHub MCP Server"), serverOpts)
 
-	// Add middlewares. Order matters - for example, the error context middleware should be applied last so that it runs FIRST (closest to the handler) to ensure all errors are captured,
-	// and any middleware that needs to read or modify the context should be before it.
+	// Add middlewares registered within NewMCPServer. These are the innermost layers —
+	// callers (e.g., NewStdioMCPServer) may register additional outer middleware after
+	// this function returns. addGitHubAPIErrorToContext is outermost within this scope
+	// so it runs first among these, but guard middleware registered by the caller
+	// (denylist, owner extract, write guard, user agent) runs before it.
 	ghServer.AddReceivingMiddleware(middleware...)
 	ghServer.AddReceivingMiddleware(InjectDepsMiddleware(deps))
 	ghServer.AddReceivingMiddleware(addGitHubAPIErrorToContext)
@@ -117,7 +149,26 @@ func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependenci
 	// In dynamic mode with no explicit toolsets, this is a no-op since enabledToolsets
 	// is empty - users enable toolsets at runtime via the dynamic tools below (but can
 	// enable toolsets or tools explicitly that do need registration).
-	inv.RegisterAll(ctx, ghServer, deps)
+	//
+	// Resources are registered separately so we can wrap handlers with the denylist
+	// when RepoDenylistEntries is configured. Tool and prompt registration is unchanged.
+	inv.RegisterTools(ctx, ghServer, deps)
+	inv.RegisterPrompts(ctx, ghServer)
+
+	// Register resource templates, wrapping handlers with denylist protection if active.
+	if denylist.IsEmpty() {
+		// No denylist — register resources normally.
+		inv.RegisterResourceTemplates(ctx, ghServer, deps)
+	} else {
+		// Denylist active — wrap each resource handler before registering.
+		for _, res := range inv.AvailableResourceTemplates(ctx) {
+			templateCopy := res.Template
+			if len(templateCopy.Icons) == 0 {
+				templateCopy.Icons = res.Toolset.Icons()
+			}
+			ghServer.AddResourceTemplate(&templateCopy, DenylistResourceHandler(denylist, res.Handler(deps)))
+		}
+	}
 
 	// Register dynamic toolset management tools (enable/disable) - these are separate
 	// meta-tools that control the inventory, not part of the inventory itself
@@ -202,12 +253,12 @@ func NewServer(version, name, title string, opts *mcp.ServerOptions) *mcp.Server
 	return s
 }
 
-func CompletionsHandler(getClient GetClientFn) func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+func CompletionsHandler(getClient GetClientFn, denylist *RepoDenylist) func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 	return func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 		switch req.Params.Ref.Type {
 		case "ref/resource":
 			if strings.HasPrefix(req.Params.Ref.URI, "repo://") {
-				return RepositoryResourceCompletionHandler(getClient)(ctx, req)
+				return RepositoryResourceCompletionHandler(getClient, denylist)(ctx, req)
 			}
 			return nil, fmt.Errorf("unsupported resource URI: %s", req.Params.Ref.URI)
 		case "ref/prompt":

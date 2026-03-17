@@ -3,6 +3,7 @@ package github
 import (
 	"testing"
 
+	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -184,4 +185,111 @@ func TestGenerateToolsetsHelp(t *testing.T) {
 	assert.Contains(t, helpText, "actions")
 	assert.Contains(t, helpText, "gists")
 	assert.Contains(t, helpText, "notifications")
+}
+
+// --- ParseToolsetModes tests ---
+
+func TestParseToolsetModes_MixedModes(t *testing.T) {
+	names, readOnly := ParseToolsetModes([]string{"repos:rw", "issues:ro", "users"}, nil)
+
+	require.Equal(t, []string{"repos", "issues", "users"}, names)
+	require.False(t, readOnly["repos"], "repos should be rw")
+	require.True(t, readOnly["issues"], "issues should be ro")
+	require.False(t, readOnly["users"], "users (no suffix) should be rw")
+}
+
+func TestParseToolsetModes_AllRo(t *testing.T) {
+	knownToolsets := []inventory.ToolsetID{"repos", "issues", "users"}
+	names, readOnly := ParseToolsetModes([]string{"all:ro"}, knownToolsets)
+
+	require.Equal(t, []string{"all"}, names, "all:ro should produce 'all' as the name")
+	require.True(t, readOnly["repos"], "repos should be read-only after all:ro expansion")
+	require.True(t, readOnly["issues"], "issues should be read-only after all:ro expansion")
+	require.True(t, readOnly["users"], "users should be read-only after all:ro expansion")
+}
+
+func TestParseToolsetModes_NoModes(t *testing.T) {
+	names, readOnly := ParseToolsetModes([]string{"repos", "issues", "users"}, nil)
+
+	require.Equal(t, []string{"repos", "issues", "users"}, names)
+	require.Empty(t, readOnly, "no toolsets should be read-only when no modes specified")
+}
+
+func TestParseToolsetModes_CaseInsensitive(t *testing.T) {
+	names, readOnly := ParseToolsetModes([]string{"repos:RO", "issues:RW", "users:ReadOnly"}, nil)
+
+	require.Equal(t, []string{"repos", "issues", "users"}, names)
+	require.True(t, readOnly["repos"], "repos:RO should be read-only (case-insensitive)")
+	require.False(t, readOnly["issues"], "issues:RW should be rw")
+	require.True(t, readOnly["users"], "users:ReadOnly should be read-only (case-insensitive)")
+}
+
+func TestParseToolsetModes_UnknownSuffix_TreatedAsName(t *testing.T) {
+	// Unknown suffix → treat entire string as name (backwards compat)
+	names, readOnly := ParseToolsetModes([]string{"repos:unknown"}, nil)
+
+	require.Equal(t, []string{"repos:unknown"}, names, "unknown suffix should be kept as part of name")
+	require.Empty(t, readOnly)
+}
+
+func TestParseToolsetModes_EmptyInput(t *testing.T) {
+	names, readOnly := ParseToolsetModes([]string{}, nil)
+
+	require.Empty(t, names)
+	require.Empty(t, readOnly)
+}
+
+func TestParseToolsetModes_NilInput(t *testing.T) {
+	names, modes := ParseToolsetModes(nil, nil)
+	if names != nil {
+		t.Errorf("expected nil names for nil input, got %v", names)
+	}
+	if modes != nil {
+		t.Errorf("expected nil modes for nil input, got %v", modes)
+	}
+}
+
+func TestParseToolsetModes_AllRoWithRwException(t *testing.T) {
+	allToolsets := []inventory.ToolsetID{"repos", "issues", "pull_requests", "users"}
+	names, readOnly := ParseToolsetModes([]string{"all:ro", "repos:rw"}, allToolsets)
+
+	require.Equal(t, []string{"all", "repos"}, names)
+	// repos should NOT be in readOnly because :rw overrides the prior all:ro
+	require.False(t, readOnly[inventory.ToolsetID("repos")],
+		"repos:rw should override all:ro for repos")
+	// Other toolsets should still be read-only
+	require.True(t, readOnly[inventory.ToolsetID("issues")])
+	require.True(t, readOnly[inventory.ToolsetID("pull_requests")])
+	require.True(t, readOnly[inventory.ToolsetID("users")])
+}
+
+func TestParseToolsetModes_AllRoWithRwException_ReversedOrder(t *testing.T) {
+	// Order matters: "repos:rw,all:ro" → repos ends up read-only because all:ro
+	// runs after the rw delete. This is the documented behavior.
+	allToolsets := []inventory.ToolsetID{"repos", "issues", "pull_requests"}
+	names, readOnly := ParseToolsetModes([]string{"repos:rw", "all:ro"}, allToolsets)
+
+	require.Equal(t, []string{"repos", "all"}, names)
+	// repos IS read-only because all:ro processed last
+	require.True(t, readOnly[inventory.ToolsetID("repos")],
+		"reversed order: all:ro after repos:rw should make repos read-only")
+	require.True(t, readOnly[inventory.ToolsetID("issues")])
+	require.True(t, readOnly[inventory.ToolsetID("pull_requests")])
+}
+
+func TestParseToolsetModes_RwWithoutPriorRo(t *testing.T) {
+	// :rw on a toolset that was never marked :ro should be a no-op (no crash)
+	names, readOnly := ParseToolsetModes([]string{"repos:rw", "issues:ro"}, nil)
+
+	require.Equal(t, []string{"repos", "issues"}, names)
+	require.False(t, readOnly[inventory.ToolsetID("repos")])
+	require.True(t, readOnly[inventory.ToolsetID("issues")])
+}
+
+func TestParseToolsetModes_AllRoNilToolsets(t *testing.T) {
+	// "all:ro" with nil allKnownToolsets: "all" is consumed as a name,
+	// but no toolset IDs are expanded into the readOnly map.
+	names, readOnly := ParseToolsetModes([]string{"all:ro"}, nil)
+	assert.Equal(t, []string{"all"}, names, "all:ro should produce 'all' as the name")
+	assert.Empty(t, readOnly, "all:ro with nil allKnownToolsets should produce empty readOnly map")
 }

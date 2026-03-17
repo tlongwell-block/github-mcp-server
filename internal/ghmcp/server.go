@@ -37,7 +37,12 @@ type githubClients struct {
 }
 
 // createGitHubClients creates all the GitHub API clients needed by the server.
-func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolver) (*githubClients, error) {
+// If skipLockdown is true, the repo access cache is not initialized even when
+// cfg.LockdownMode is set. This must be true when GitHub App multi-org auth is
+// active: MultiOrgDeps creates per-installation caches via
+// lockdown.NewRepoAccessCache (not the singleton GetInstance), and initializing
+// the singleton here with the PAT-based GQL client would conflict.
+func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolver, skipLockdown bool) (*githubClients, error) {
 	restURL, err := apiHost.BaseRESTURL(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get base REST URL: %w", err)
@@ -80,9 +85,12 @@ func createGitHubClients(cfg github.MCPServerConfig, apiHost utils.APIHostResolv
 	// Create raw content client (shares REST client's HTTP transport)
 	rawClient := raw.NewClient(restClient, rawURL)
 
-	// Set up repo access cache for lockdown mode
+	// Set up repo access cache for lockdown mode.
+	// Skipped when skipLockdown is true (multi-org app auth): the singleton must
+	// not be initialized with this PAT client — MultiOrgDeps creates its own
+	// per-installation cache via lockdown.NewRepoAccessCache (non-singleton).
 	var repoAccessCache *lockdown.RepoAccessCache
-	if cfg.LockdownMode {
+	if cfg.LockdownMode && !skipLockdown {
 		opts := []lockdown.RepoAccessOption{
 			lockdown.WithLogger(cfg.Logger.With("component", "lockdown")),
 		}
@@ -107,7 +115,16 @@ func NewStdioMCPServer(ctx context.Context, cfg github.MCPServerConfig) (*mcp.Se
 		return nil, fmt.Errorf("failed to parse API host: %w", err)
 	}
 
-	clients, err := createGitHubClients(cfg, apiHost)
+	// Skip lockdown singleton init when GitHub App multi-org auth is active.
+	// MultiOrgDeps creates its own per-org lockdown cache; initializing the
+	// singleton here with the PAT client would corrupt it for all org requests.
+	//
+	// App auth is active when AppID is set AND at least one installation is
+	// configured. The Installations map includes "_default" from
+	// GITHUB_INSTALLATION_ID (populated by parseOrgInstallations in main.go),
+	// so setting just AppID + InstallationID + PrivateKey is sufficient.
+	appAuthActive := cfg.AppID != 0 && len(cfg.Installations) > 0
+	clients, err := createGitHubClients(cfg, apiHost, appAuthActive)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GitHub clients: %w", err)
 	}
@@ -115,25 +132,73 @@ func NewStdioMCPServer(ctx context.Context, cfg github.MCPServerConfig) (*mcp.Se
 	// Create feature checker
 	featureChecker := createFeatureChecker(cfg.EnabledFeatures)
 
-	// Create dependencies for tool handlers
-	deps := github.NewBaseDeps(
-		clients.rest,
-		clients.gql,
-		clients.raw,
-		clients.repoAccess,
-		cfg.Translator,
-		github.FeatureFlags{
-			LockdownMode: cfg.LockdownMode,
-			InsidersMode: cfg.InsidersMode,
-		},
-		cfg.ContentWindowSize,
-		featureChecker,
-	)
+	flags := github.FeatureFlags{
+		LockdownMode: cfg.LockdownMode,
+		InsidersMode: cfg.InsidersMode,
+	}
+
+	// Determine which deps to use: MultiOrgDeps for GitHub App multi-org, BaseDeps otherwise.
+	var deps github.ToolDependencies
+	var multiOrgFactory *github.MultiOrgClientFactory // non-nil when app auth active
+	if appAuthActive {
+		// GitHub App auth with multi-org support.
+		rawURL, err := apiHost.RawURL(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get raw URL for multi-org factory: %w", err)
+		}
+		multiOrgFactory = github.NewMultiOrgClientFactory(
+			cfg.AppID,
+			cfg.PrivateKey,
+			cfg.Installations,
+			apiHost,
+			rawURL,
+			cfg.Version,
+		)
+		// Build repoAccessOpts to pass to MultiOrgDeps (mirrors createGitHubClients logic).
+		var repoAccessOpts []lockdown.RepoAccessOption
+		if cfg.LockdownMode {
+			repoAccessOpts = append(repoAccessOpts,
+				lockdown.WithLogger(cfg.Logger.With("component", "lockdown")),
+			)
+			if cfg.RepoAccessTTL != nil {
+				repoAccessOpts = append(repoAccessOpts, lockdown.WithTTL(*cfg.RepoAccessTTL))
+			}
+		}
+		deps = github.NewMultiOrgDeps(
+			multiOrgFactory,
+			cfg.Translator,
+			flags,
+			cfg.ContentWindowSize,
+			featureChecker,
+			cfg.LockdownMode,
+			repoAccessOpts,
+		)
+	} else {
+		// Standard PAT auth — use existing BaseDeps path.
+		deps = github.NewBaseDeps(
+			clients.rest,
+			clients.gql,
+			clients.raw,
+			clients.repoAccess,
+			cfg.Translator,
+			flags,
+			cfg.ContentWindowSize,
+			featureChecker,
+		)
+	}
+
+	// Parse toolset modes (e.g., "repos:rw,issues:ro") from config.
+	// This splits the name:mode suffix from the toolset name and builds a read-only map.
+	// "all:ro" is expanded to all known toolset IDs so every toolset becomes read-only.
+	allKnownToolsets := github.AllToolsetIDs()
+	toolsetNames, readOnlyToolsets := github.ParseToolsetModes(cfg.EnabledToolsets, allKnownToolsets)
+
 	// Build and register the tool/resource/prompt inventory
 	inventoryBuilder := github.NewInventory(cfg.Translator).
 		WithDeprecatedAliases(github.DeprecatedToolAliases).
 		WithReadOnly(cfg.ReadOnly).
-		WithToolsets(github.ResolvedEnabledToolsets(cfg.DynamicToolsets, cfg.EnabledToolsets, cfg.EnabledTools)).
+		WithToolsets(github.ResolvedEnabledToolsets(cfg.DynamicToolsets, toolsetNames, cfg.EnabledTools)).
+		WithToolsetModes(readOnlyToolsets).
 		WithTools(github.CleanTools(cfg.EnabledTools)).
 		WithExcludeTools(cfg.ExcludeTools).
 		WithServerInstructions().
@@ -145,12 +210,17 @@ func NewStdioMCPServer(ctx context.Context, cfg github.MCPServerConfig) (*mcp.Se
 		inventoryBuilder = inventoryBuilder.WithFilter(github.CreateToolScopeFilter(cfg.TokenScopes))
 	}
 
-	inventory, err := inventoryBuilder.Build()
+	inv, err := inventoryBuilder.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build inventory: %w", err)
 	}
 
-	ghServer, err := github.NewMCPServer(ctx, &cfg, deps, inventory)
+	// Build denylist once here so it can be passed to both NewMCPServer (for
+	// completions and resource handlers) and the middleware section below.
+	denylist := github.NewRepoDenylist(cfg.RepoDenylistEntries)
+	cfg.Denylist = denylist
+
+	ghServer, err := github.NewMCPServer(ctx, &cfg, deps, inv)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GitHub MCP server: %w", err)
 	}
@@ -162,7 +232,66 @@ func NewStdioMCPServer(ctx context.Context, cfg github.MCPServerConfig) (*mcp.Se
 		github.RegisterUIResources(ghServer)
 	}
 
-	ghServer.AddReceivingMiddleware(addUserAgentsMiddleware(cfg, clients.rest, clients.gqlHTTP))
+	// Register guard middleware BEFORE the user-agent middleware.
+	// Use single-call form so the first arg is outermost (runs first per request).
+	//
+	// Execution order (outermost first):
+	//   UA → denylist → searchDenylist → ownerExtract → writeGuard
+	//     → addGitHubAPIError → InjectDeps → handler
+	//
+	// UA is outermost because it's registered last (wraps everything).
+	// addGitHubAPIError and InjectDeps are innermost — registered last in NewMCPServer
+	// (last-registered = innermost = closest to the handler).
+	//
+	// Denylist runs before any GitHub API call (pure in-memory lookup).
+	// Owner extract populates context owner for MultiOrgDeps routing so that
+	// subsequent middleware can use deps.GetClient(ctx) with the correct
+	// org-scoped client. Write guard calls deps.GetClient(ctx) which uses
+	// OwnerFromContext — must run AFTER owner extract.
+	var guardMiddleware []mcp.Middleware
+
+	// Denylist guard (outermost — pure in-memory, no API calls).
+	// Reuses the denylist built above — no second NewRepoDenylist call.
+	if !denylist.IsEmpty() {
+		guardMiddleware = append(guardMiddleware,
+			github.RepoDenylistMiddleware(denylist),
+			github.SearchDenylistMiddleware(denylist),
+		)
+	}
+
+	// Owner extraction middleware (must run BEFORE write guard for correct
+	// multi-org routing: WritePrivateOnlyMiddleware calls deps.GetClient(ctx)
+	// which uses OwnerFromContext to select the org-scoped client).
+	//
+	// Only registered for GitHub App auth: PAT auth uses BaseDeps whose
+	// GetClient ignores the context owner, so extraction is unnecessary.
+	// If a new ToolDependencies implementation is added that requires owner
+	// context, this condition must be updated.
+	if appAuthActive {
+		guardMiddleware = append(guardMiddleware, github.OwnerExtractMiddleware())
+	}
+
+	// Write guard (after owner extract — needs owner in context for correct client).
+	if cfg.WritePrivateOnly {
+		if cfg.ReadOnly {
+			cfg.Logger.Warn("GITHUB_WRITE_PRIVATE_ONLY has no effect when --read-only is active")
+		} else {
+			guardMiddleware = append(guardMiddleware,
+				github.WritePrivateOnlyMiddleware(deps, inv),
+			)
+		}
+	}
+
+	// Register all guard middleware in a single call to preserve ordering.
+	// AddReceivingMiddleware(m1, m2, m3) → m1 is outermost (runs first).
+	if len(guardMiddleware) > 0 {
+		ghServer.AddReceivingMiddleware(guardMiddleware...)
+	}
+
+	// Existing user-agent middleware (must come AFTER guards).
+	// Pass multiOrgFactory so the initialize handshake propagates the user agent
+	// to all per-org clients created by the factory. nil when PAT auth is used.
+	ghServer.AddReceivingMiddleware(addUserAgentsMiddleware(cfg, clients.rest, clients.gqlHTTP, multiOrgFactory))
 
 	return ghServer, nil
 }
@@ -222,6 +351,21 @@ type StdioServerConfig struct {
 
 	// RepoAccessCacheTTL overrides the default TTL for repository access cache entries.
 	RepoAccessCacheTTL *time.Duration
+
+	// GitHub App authentication
+	AppID          int64
+	InstallationID int64
+	PrivateKeyPath string
+	PrivateKey     string
+
+	// Multi-org installations (org name → installation ID)
+	Installations map[string]int64
+
+	// Write guard
+	WritePrivateOnly bool
+
+	// Repo denylist
+	RepoDenylist []string
 }
 
 // RunStdioServer is not concurrent safe.
@@ -264,23 +408,39 @@ func RunStdioServer(cfg StdioServerConfig) error {
 		logger.Debug("skipping scope filtering for non-PAT token")
 	}
 
+	// Resolve private key (from file path or inline content) for GitHub App auth.
+	var privateKey []byte
+	if cfg.PrivateKeyPath != "" || cfg.PrivateKey != "" {
+		var err error
+		privateKey, err = github.ResolvePrivateKey([]byte(cfg.PrivateKey), cfg.PrivateKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve private key: %w", err)
+		}
+	}
+
 	ghServer, err := NewStdioMCPServer(ctx, github.MCPServerConfig{
-		Version:           cfg.Version,
-		Host:              cfg.Host,
-		Token:             cfg.Token,
-		EnabledToolsets:   cfg.EnabledToolsets,
-		EnabledTools:      cfg.EnabledTools,
-		EnabledFeatures:   cfg.EnabledFeatures,
-		DynamicToolsets:   cfg.DynamicToolsets,
-		ReadOnly:          cfg.ReadOnly,
-		Translator:        t,
-		ContentWindowSize: cfg.ContentWindowSize,
-		LockdownMode:      cfg.LockdownMode,
-		InsidersMode:      cfg.InsidersMode,
-		ExcludeTools:      cfg.ExcludeTools,
-		Logger:            logger,
-		RepoAccessTTL:     cfg.RepoAccessCacheTTL,
-		TokenScopes:       tokenScopes,
+		Version:             cfg.Version,
+		Host:                cfg.Host,
+		Token:               cfg.Token,
+		EnabledToolsets:     cfg.EnabledToolsets,
+		EnabledTools:        cfg.EnabledTools,
+		EnabledFeatures:     cfg.EnabledFeatures,
+		DynamicToolsets:     cfg.DynamicToolsets,
+		ReadOnly:            cfg.ReadOnly,
+		Translator:          t,
+		ContentWindowSize:   cfg.ContentWindowSize,
+		LockdownMode:        cfg.LockdownMode,
+		InsidersMode:        cfg.InsidersMode,
+		ExcludeTools:        cfg.ExcludeTools,
+		Logger:              logger,
+		RepoAccessTTL:       cfg.RepoAccessCacheTTL,
+		TokenScopes:         tokenScopes,
+		AppID:               cfg.AppID,
+		InstallationID:      cfg.InstallationID,
+		PrivateKey:          privateKey,
+		Installations:       cfg.Installations,
+		WritePrivateOnly:    cfg.WritePrivateOnly,
+		RepoDenylistEntries: cfg.RepoDenylist,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create MCP server: %w", err)
@@ -341,7 +501,13 @@ func createFeatureChecker(enabledFeatures []string) inventory.FeatureFlagChecker
 	}
 }
 
-func addUserAgentsMiddleware(cfg github.MCPServerConfig, restClient *gogithub.Client, gqlHTTPClient *http.Client) func(next mcp.MethodHandler) mcp.MethodHandler {
+// addUserAgentsMiddleware returns middleware that sets the user agent on all
+// GitHub API clients after the MCP initialize handshake provides client info.
+//
+// The optional multiOrgFactory parameter propagates the user agent to clients
+// created by MultiOrgClientFactory (GitHub App multi-org auth). When nil, only
+// the PAT-based REST and GQL clients are updated.
+func addUserAgentsMiddleware(cfg github.MCPServerConfig, restClient *gogithub.Client, gqlHTTPClient *http.Client, multiOrgFactory *github.MultiOrgClientFactory) func(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, request mcp.Request) (result mcp.Result, err error) {
 			if method != "initialize" {
@@ -369,6 +535,12 @@ func addUserAgentsMiddleware(cfg github.MCPServerConfig, restClient *gogithub.Cl
 			gqlHTTPClient.Transport = &transport.UserAgentTransport{
 				Transport: gqlHTTPClient.Transport,
 				Agent:     userAgent,
+			}
+
+			// Propagate user agent to multi-org factory so all per-org clients
+			// created after this point use the correct user agent string.
+			if multiOrgFactory != nil {
+				multiOrgFactory.SetUserAgent(userAgent)
 			}
 
 			return next(ctx, method, request)
