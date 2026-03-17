@@ -1,14 +1,19 @@
 package github
 
 import (
+	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/github/github-mcp-server/pkg/translations"
-	"github.com/mark3labs/mcp-go/server"
 )
 
-func RegisterResources(s *server.MCPServer, getClient GetClientFn, t translations.TranslationHelperFunc) {
-	s.AddResourceTemplate(GetRepositoryResourceContent(getClient, t))
-	s.AddResourceTemplate(GetRepositoryResourceBranchContent(getClient, t))
-	s.AddResourceTemplate(GetRepositoryResourceCommitContent(getClient, t))
-	s.AddResourceTemplate(GetRepositoryResourceTagContent(getClient, t))
-	s.AddResourceTemplate(GetRepositoryResourcePrContent(getClient, t))
+// AllResources returns all resource templates with their embedded toolset metadata.
+// Resource definitions are stateless - handlers are generated on-demand during registration.
+func AllResources(t translations.TranslationHelperFunc) []inventory.ServerResourceTemplate {
+	return []inventory.ServerResourceTemplate{
+		// Repository resources
+		GetRepositoryResourceContent(t),
+		GetRepositoryResourceBranchContent(t),
+		GetRepositoryResourceCommitContent(t),
+		GetRepositoryResourceTagContent(t),
+		GetRepositoryResourcePrContent(t),
+	}
 }

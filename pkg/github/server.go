@@ -1,216 +1,279 @@
 package github
 
 import (
-	"errors"
+	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
-	"github.com/google/go-github/v69/github"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	gherrors "github.com/github/github-mcp-server/pkg/errors"
+	"github.com/github/github-mcp-server/pkg/inventory"
+	"github.com/github/github-mcp-server/pkg/octicons"
+	"github.com/github/github-mcp-server/pkg/translations"
+	"github.com/github/github-mcp-server/pkg/utils"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// NewServer creates a new GitHub MCP server with the specified GH client and logger.
+type MCPServerConfig struct {
+	// Version of the server
+	Version string
 
-func NewServer(version string, opts ...server.ServerOption) *server.MCPServer {
-	// Add default options
-	defaultOpts := []server.ServerOption{
-		server.WithToolCapabilities(true),
-		server.WithResourceCapabilities(true, true),
-		server.WithLogging(),
+	// GitHub Host to target for API requests (e.g. github.com or github.enterprise.com)
+	Host string
+
+	// GitHub Token to authenticate with the GitHub API
+	Token string
+
+	// EnabledToolsets is a list of toolsets to enable
+	// See: https://github.com/github/github-mcp-server?tab=readme-ov-file#tool-configuration
+	EnabledToolsets []string
+
+	// EnabledTools is a list of specific tools to enable (additive to toolsets)
+	// When specified, these tools are registered in addition to any specified toolset tools
+	EnabledTools []string
+
+	// EnabledFeatures is a list of feature flags that are enabled
+	// Items with FeatureFlagEnable matching an entry in this list will be available
+	EnabledFeatures []string
+
+	// Whether to enable dynamic toolsets
+	// See: https://github.com/github/github-mcp-server?tab=readme-ov-file#dynamic-tool-discovery
+	DynamicToolsets bool
+
+	// ReadOnly indicates if we should only offer read-only tools
+	ReadOnly bool
+
+	// Translator provides translated text for the server tooling
+	Translator translations.TranslationHelperFunc
+
+	// Content window size
+	ContentWindowSize int
+
+	// LockdownMode indicates if we should enable lockdown mode
+	LockdownMode bool
+
+	// InsidersMode indicates if we should enable experimental features
+	InsidersMode bool
+
+	// Logger is used for logging within the server
+	Logger *slog.Logger
+	// RepoAccessTTL overrides the default TTL for repository access cache entries.
+	RepoAccessTTL *time.Duration
+
+	// ExcludeTools is a list of tool names that should be disabled regardless of
+	// other configuration. These tools will be excluded even if their toolset is enabled
+	// or they are explicitly listed in EnabledTools.
+	ExcludeTools []string
+
+	// TokenScopes contains the OAuth scopes available to the token.
+	// When non-nil, tools requiring scopes not in this list will be hidden.
+	// This is used for PAT scope filtering where we can't issue scope challenges.
+	TokenScopes []string
+
+	// Additional server options to apply
+	ServerOptions []MCPServerOption
+
+	// GitHub App authentication
+	AppID          int64
+	InstallationID int64  // default installation; folded into Installations["_default"] by CLI
+	PrivateKey     []byte // resolved private key bytes (from file or content)
+
+	// Multi-org installations (org name → installation ID)
+	Installations map[string]int64
+
+	// WritePrivateOnly restricts repository write operations to private repos only.
+	// When true, any tool with ReadOnlyHint=false that takes owner+repo params will
+	// have its target repo's visibility checked before execution. Public repos are
+	// blocked. Note: this also blocks star/unstar operations on public repos, since
+	// those tools are not marked ReadOnlyHint=true. This is intentional — the guard
+	// is conservative by design.
+	WritePrivateOnly bool
+
+	// Repo denylist entries (parsed from GITHUB_REPO_DENYLIST)
+	RepoDenylistEntries []string
+
+	// Pre-built repo denylist (constructed once by the caller).
+	// When non-nil, used directly instead of building from RepoDenylistEntries.
+	Denylist *RepoDenylist
+}
+
+type MCPServerOption func(*mcp.ServerOptions)
+
+func NewMCPServer(ctx context.Context, cfg *MCPServerConfig, deps ToolDependencies, inv *inventory.Inventory, middleware ...mcp.Middleware) (*mcp.Server, error) {
+	// Use pre-built denylist if provided, otherwise construct from entries.
+	denylist := cfg.Denylist
+	if denylist == nil {
+		denylist = NewRepoDenylist(cfg.RepoDenylistEntries)
 	}
-	opts = append(defaultOpts, opts...)
+
+	// Create the MCP server
+	serverOpts := &mcp.ServerOptions{
+		Instructions:      inv.Instructions(),
+		Logger:            cfg.Logger,
+		CompletionHandler: CompletionsHandler(deps.GetClient, denylist),
+	}
+
+	// Apply any additional server options
+	for _, o := range cfg.ServerOptions {
+		o(serverOpts)
+	}
+
+	// In dynamic mode, explicitly advertise capabilities since tools/resources/prompts
+	// may be enabled at runtime even if none are registered initially.
+	if cfg.DynamicToolsets {
+		serverOpts.Capabilities = &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{},
+			Resources: &mcp.ResourceCapabilities{},
+			Prompts:   &mcp.PromptCapabilities{},
+		}
+	}
+
+	ghServer := NewServer(cfg.Version, cfg.Translator("SERVER_NAME", "github-mcp-server"), cfg.Translator("SERVER_TITLE", "GitHub MCP Server"), serverOpts)
+
+	// Add middlewares registered within NewMCPServer. These are the innermost layers —
+	// callers (e.g., NewStdioMCPServer) may register additional outer middleware after
+	// this function returns. addGitHubAPIErrorToContext is outermost within this scope
+	// so it runs first among these, but guard middleware registered by the caller
+	// (denylist, owner extract, write guard, user agent) runs before it.
+	ghServer.AddReceivingMiddleware(middleware...)
+	ghServer.AddReceivingMiddleware(InjectDepsMiddleware(deps))
+	ghServer.AddReceivingMiddleware(addGitHubAPIErrorToContext)
+
+	if unrecognized := inv.UnrecognizedToolsets(); len(unrecognized) > 0 {
+		cfg.Logger.Warn("Warning: unrecognized toolsets ignored", "toolsets", strings.Join(unrecognized, ", "))
+	}
+
+	// Register GitHub tools/resources/prompts from the inventory.
+	// In dynamic mode with no explicit toolsets, this is a no-op since enabledToolsets
+	// is empty - users enable toolsets at runtime via the dynamic tools below (but can
+	// enable toolsets or tools explicitly that do need registration).
+	//
+	// Resources are registered separately so we can wrap handlers with the denylist
+	// when RepoDenylistEntries is configured. Tool and prompt registration is unchanged.
+	inv.RegisterTools(ctx, ghServer, deps)
+	inv.RegisterPrompts(ctx, ghServer)
+
+	// Register resource templates, wrapping handlers with denylist protection if active.
+	if denylist.IsEmpty() {
+		// No denylist — register resources normally.
+		inv.RegisterResourceTemplates(ctx, ghServer, deps)
+	} else {
+		// Denylist active — wrap each resource handler before registering.
+		for _, res := range inv.AvailableResourceTemplates(ctx) {
+			templateCopy := res.Template
+			if len(templateCopy.Icons) == 0 {
+				templateCopy.Icons = res.Toolset.Icons()
+			}
+			ghServer.AddResourceTemplate(&templateCopy, DenylistResourceHandler(denylist, res.Handler(deps)))
+		}
+	}
+
+	// Register dynamic toolset management tools (enable/disable) - these are separate
+	// meta-tools that control the inventory, not part of the inventory itself
+	if cfg.DynamicToolsets {
+		registerDynamicTools(ghServer, inv, deps, cfg.Translator)
+	}
+
+	return ghServer, nil
+}
+
+// registerDynamicTools adds the dynamic toolset enable/disable tools to the server.
+func registerDynamicTools(server *mcp.Server, inventory *inventory.Inventory, deps ToolDependencies, t translations.TranslationHelperFunc) {
+	dynamicDeps := DynamicToolDependencies{
+		Server:    server,
+		Inventory: inventory,
+		ToolDeps:  deps,
+		T:         t,
+	}
+	for _, tool := range DynamicTools(inventory) {
+		tool.RegisterFunc(server, dynamicDeps)
+	}
+}
+
+// ResolvedEnabledToolsets determines which toolsets should be enabled based on config.
+// Returns nil for "use defaults", empty slice for "none", or explicit list.
+func ResolvedEnabledToolsets(dynamicToolsets bool, enabledToolsets []string, enabledTools []string) []string {
+	// In dynamic mode, remove "all" and "default" since users enable toolsets on demand
+	if dynamicToolsets && enabledToolsets != nil {
+		enabledToolsets = RemoveToolset(enabledToolsets, string(ToolsetMetadataAll.ID))
+		enabledToolsets = RemoveToolset(enabledToolsets, string(ToolsetMetadataDefault.ID))
+	}
+
+	if enabledToolsets != nil {
+		return enabledToolsets
+	}
+	if dynamicToolsets {
+		// Dynamic mode with no toolsets specified: start empty so users enable on demand
+		return []string{}
+	}
+	if len(enabledTools) > 0 {
+		// When specific tools are requested but no toolsets, don't use default toolsets
+		// This matches the original behavior: --tools=X alone registers only X
+		return []string{}
+	}
+
+	// nil means "use defaults" in WithToolsets
+	return nil
+}
+
+func addGitHubAPIErrorToContext(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (result mcp.Result, err error) {
+		// Ensure the context is cleared of any previous errors
+		// as context isn't propagated through middleware
+		ctx = gherrors.ContextWithGitHubErrors(ctx)
+		return next(ctx, method, req)
+	}
+}
+
+// NewServer creates a new GitHub MCP server with the given version, server
+// name, display title, and options. If name or title are empty the defaults
+// "github-mcp-server" and "GitHub MCP Server" are used.
+func NewServer(version, name, title string, opts *mcp.ServerOptions) *mcp.Server {
+	if opts == nil {
+		opts = &mcp.ServerOptions{}
+	}
+
+	if name == "" {
+		name = "github-mcp-server"
+	}
+	if title == "" {
+		title = "GitHub MCP Server"
+	}
 
 	// Create a new MCP server
-	s := server.NewMCPServer(
-		"github-mcp-server",
-		version,
-		opts...,
-	)
+	s := mcp.NewServer(&mcp.Implementation{
+		Name:    name,
+		Title:   title,
+		Version: version,
+		Icons:   octicons.Icons("mark-github"),
+	}, opts)
+
 	return s
 }
 
-// OptionalParamOK is a helper function that can be used to fetch a requested parameter from the request.
-// It returns the value, a boolean indicating if the parameter was present, and an error if the type is wrong.
-func OptionalParamOK[T any](r mcp.CallToolRequest, p string) (value T, ok bool, err error) {
-	// Check if the parameter is present in the request
-	val, exists := r.Params.Arguments[p]
-	if !exists {
-		// Not present, return zero value, false, no error
-		return
-	}
-
-	// Check if the parameter is of the expected type
-	value, ok = val.(T)
-	if !ok {
-		// Present but wrong type
-		err = fmt.Errorf("parameter %s is not of type %T, is %T", p, value, val)
-		ok = true // Set ok to true because the parameter *was* present, even if wrong type
-		return
-	}
-
-	// Present and correct type
-	ok = true
-	return
-}
-
-// isAcceptedError checks if the error is an accepted error.
-func isAcceptedError(err error) bool {
-	var acceptedError *github.AcceptedError
-	return errors.As(err, &acceptedError)
-}
-
-// requiredParam is a helper function that can be used to fetch a requested parameter from the request.
-// It does the following checks:
-// 1. Checks if the parameter is present in the request.
-// 2. Checks if the parameter is of the expected type.
-// 3. Checks if the parameter is not empty, i.e: non-zero value
-func requiredParam[T comparable](r mcp.CallToolRequest, p string) (T, error) {
-	var zero T
-
-	// Check if the parameter is present in the request
-	if _, ok := r.Params.Arguments[p]; !ok {
-		return zero, fmt.Errorf("missing required parameter: %s", p)
-	}
-
-	// Check if the parameter is of the expected type
-	if _, ok := r.Params.Arguments[p].(T); !ok {
-		return zero, fmt.Errorf("parameter %s is not of type %T", p, zero)
-	}
-
-	if r.Params.Arguments[p].(T) == zero {
-		return zero, fmt.Errorf("missing required parameter: %s", p)
-
-	}
-
-	return r.Params.Arguments[p].(T), nil
-}
-
-// RequiredInt is a helper function that can be used to fetch a requested parameter from the request.
-// It does the following checks:
-// 1. Checks if the parameter is present in the request.
-// 2. Checks if the parameter is of the expected type.
-// 3. Checks if the parameter is not empty, i.e: non-zero value
-func RequiredInt(r mcp.CallToolRequest, p string) (int, error) {
-	v, err := requiredParam[float64](r, p)
-	if err != nil {
-		return 0, err
-	}
-	return int(v), nil
-}
-
-// OptionalParam is a helper function that can be used to fetch a requested parameter from the request.
-// It does the following checks:
-// 1. Checks if the parameter is present in the request, if not, it returns its zero-value
-// 2. If it is present, it checks if the parameter is of the expected type and returns it
-func OptionalParam[T any](r mcp.CallToolRequest, p string) (T, error) {
-	var zero T
-
-	// Check if the parameter is present in the request
-	if _, ok := r.Params.Arguments[p]; !ok {
-		return zero, nil
-	}
-
-	// Check if the parameter is of the expected type
-	if _, ok := r.Params.Arguments[p].(T); !ok {
-		return zero, fmt.Errorf("parameter %s is not of type %T, is %T", p, zero, r.Params.Arguments[p])
-	}
-
-	return r.Params.Arguments[p].(T), nil
-}
-
-// OptionalIntParam is a helper function that can be used to fetch a requested parameter from the request.
-// It does the following checks:
-// 1. Checks if the parameter is present in the request, if not, it returns its zero-value
-// 2. If it is present, it checks if the parameter is of the expected type and returns it
-func OptionalIntParam(r mcp.CallToolRequest, p string) (int, error) {
-	v, err := OptionalParam[float64](r, p)
-	if err != nil {
-		return 0, err
-	}
-	return int(v), nil
-}
-
-// OptionalIntParamWithDefault is a helper function that can be used to fetch a requested parameter from the request
-// similar to optionalIntParam, but it also takes a default value.
-func OptionalIntParamWithDefault(r mcp.CallToolRequest, p string, d int) (int, error) {
-	v, err := OptionalIntParam(r, p)
-	if err != nil {
-		return 0, err
-	}
-	if v == 0 {
-		return d, nil
-	}
-	return v, nil
-}
-
-// OptionalStringArrayParam is a helper function that can be used to fetch a requested parameter from the request.
-// It does the following checks:
-// 1. Checks if the parameter is present in the request, if not, it returns its zero-value
-// 2. If it is present, iterates the elements and checks each is a string
-func OptionalStringArrayParam(r mcp.CallToolRequest, p string) ([]string, error) {
-	// Check if the parameter is present in the request
-	if _, ok := r.Params.Arguments[p]; !ok {
-		return []string{}, nil
-	}
-
-	switch v := r.Params.Arguments[p].(type) {
-	case nil:
-		return []string{}, nil
-	case []string:
-		return v, nil
-	case []any:
-		strSlice := make([]string, len(v))
-		for i, v := range v {
-			s, ok := v.(string)
-			if !ok {
-				return []string{}, fmt.Errorf("parameter %s is not of type string, is %T", p, v)
+func CompletionsHandler(getClient GetClientFn, denylist *RepoDenylist) func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+	return func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+		switch req.Params.Ref.Type {
+		case "ref/resource":
+			if strings.HasPrefix(req.Params.Ref.URI, "repo://") {
+				return RepositoryResourceCompletionHandler(getClient, denylist)(ctx, req)
 			}
-			strSlice[i] = s
+			return nil, fmt.Errorf("unsupported resource URI: %s", req.Params.Ref.URI)
+		case "ref/prompt":
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unsupported ref type: %s", req.Params.Ref.Type)
 		}
-		return strSlice, nil
-	default:
-		return []string{}, fmt.Errorf("parameter %s could not be coerced to []string, is %T", p, r.Params.Arguments[p])
 	}
 }
 
-// WithPagination returns a ToolOption that adds "page" and "perPage" parameters to the tool.
-// The "page" parameter is optional, min 1. The "perPage" parameter is optional, min 1, max 100.
-func WithPagination() mcp.ToolOption {
-	return func(tool *mcp.Tool) {
-		mcp.WithNumber("page",
-			mcp.Description("Page number for pagination (min 1)"),
-			mcp.Min(1),
-		)(tool)
-
-		mcp.WithNumber("perPage",
-			mcp.Description("Results per page for pagination (min 1, max 100)"),
-			mcp.Min(1),
-			mcp.Max(100),
-		)(tool)
-	}
-}
-
-type PaginationParams struct {
-	page    int
-	perPage int
-}
-
-// OptionalPaginationParams returns the "page" and "perPage" parameters from the request,
-// or their default values if not present, "page" default is 1, "perPage" default is 30.
-// In future, we may want to make the default values configurable, or even have this
-// function returned from `withPagination`, where the defaults are provided alongside
-// the min/max values.
-func OptionalPaginationParams(r mcp.CallToolRequest) (PaginationParams, error) {
-	page, err := OptionalIntParamWithDefault(r, "page", 1)
+func MarshalledTextResult(v any) *mcp.CallToolResult {
+	data, err := json.Marshal(v)
 	if err != nil {
-		return PaginationParams{}, err
+		return utils.NewToolResultErrorFromErr("failed to marshal text result to json", err)
 	}
-	perPage, err := OptionalIntParamWithDefault(r, "perPage", 30)
-	if err != nil {
-		return PaginationParams{}, err
-	}
-	return PaginationParams{
-		page:    page,
-		perPage: perPage,
-	}, nil
+
+	return utils.NewToolResultText(string(data))
 }

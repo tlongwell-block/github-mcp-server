@@ -2,139 +2,532 @@ package github
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"strings"
 
-	"github.com/github/github-mcp-server/pkg/toolsets"
+	"github.com/github/github-mcp-server/pkg/inventory"
 	"github.com/github/github-mcp-server/pkg/translations"
-	"github.com/google/go-github/v69/github"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/google/go-github/v82/github"
 	"github.com/shurcooL/githubv4"
 )
 
 type GetClientFn func(context.Context) (*github.Client, error)
 type GetGQLClientFn func(context.Context) (*githubv4.Client, error)
 
-var DefaultTools = []string{"all"}
-
-func InitToolsets(passedToolsets []string, readOnly bool, getClient GetClientFn, getGQLClient GetGQLClientFn, t translations.TranslationHelperFunc) (*toolsets.ToolsetGroup, error) {
-	// Create a new toolset group
-	tsg := toolsets.NewToolsetGroup(readOnly)
-
-	// Define all available features with their default state (disabled)
-	// Create toolsets
-	repos := toolsets.NewToolset("repos", "GitHub Repository related tools").
-		AddReadTools(
-			toolsets.NewServerTool(SearchRepositories(getClient, t)),
-			toolsets.NewServerTool(GetFileContents(getClient, t)),
-			toolsets.NewServerTool(ListCommits(getClient, t)),
-			toolsets.NewServerTool(SearchCode(getClient, t)),
-			toolsets.NewServerTool(GetCommit(getClient, t)),
-			toolsets.NewServerTool(ListBranches(getClient, t)),
-			toolsets.NewServerTool(ListTags(getClient, t)),
-			toolsets.NewServerTool(GetTag(getClient, t)),
-		).
-		AddWriteTools(
-			toolsets.NewServerTool(CreateOrUpdateFile(getClient, t)),
-			toolsets.NewServerTool(CreateRepository(getClient, t)),
-			toolsets.NewServerTool(ForkRepository(getClient, t)),
-			toolsets.NewServerTool(CreateBranch(getClient, t)),
-			toolsets.NewServerTool(PushFiles(getClient, t)),
-			toolsets.NewServerTool(DeleteFile(getClient, t)),
-		)
-	issues := toolsets.NewToolset("issues", "GitHub Issues related tools").
-		AddReadTools(
-			toolsets.NewServerTool(GetIssue(getClient, t)),
-			toolsets.NewServerTool(SearchIssues(getClient, t)),
-			toolsets.NewServerTool(ListIssues(getClient, t)),
-			toolsets.NewServerTool(GetIssueComments(getClient, t)),
-		).
-		AddWriteTools(
-			toolsets.NewServerTool(CreateIssue(getClient, t)),
-			toolsets.NewServerTool(AddIssueComment(getClient, t)),
-			toolsets.NewServerTool(UpdateIssue(getClient, t)),
-		)
-	users := toolsets.NewToolset("users", "GitHub User related tools").
-		AddReadTools(
-			toolsets.NewServerTool(SearchUsers(getClient, t)),
-		)
-	pullRequests := toolsets.NewToolset("pull_requests", "GitHub Pull Request related tools").
-		AddReadTools(
-			toolsets.NewServerTool(GetPullRequest(getClient, t)),
-			toolsets.NewServerTool(ListPullRequests(getClient, t)),
-			toolsets.NewServerTool(GetPullRequestFiles(getClient, t)),
-			toolsets.NewServerTool(GetPullRequestStatus(getClient, t)),
-			toolsets.NewServerTool(GetPullRequestComments(getClient, t)),
-			toolsets.NewServerTool(GetPullRequestReviews(getClient, t)),
-			toolsets.NewServerTool(GetPullRequestDiff(getClient, t)),
-		).
-		AddWriteTools(
-			toolsets.NewServerTool(MergePullRequest(getClient, t)),
-			toolsets.NewServerTool(UpdatePullRequestBranch(getClient, t)),
-			toolsets.NewServerTool(CreatePullRequest(getClient, t)),
-			toolsets.NewServerTool(UpdatePullRequest(getClient, t)),
-			toolsets.NewServerTool(RequestCopilotReview(getClient, t)),
-
-			// Reviews
-			toolsets.NewServerTool(CreateAndSubmitPullRequestReview(getGQLClient, t)),
-			toolsets.NewServerTool(CreatePendingPullRequestReview(getGQLClient, t)),
-			toolsets.NewServerTool(AddPullRequestReviewCommentToPendingReview(getGQLClient, t)),
-			toolsets.NewServerTool(SubmitPendingPullRequestReview(getGQLClient, t)),
-			toolsets.NewServerTool(DeletePendingPullRequestReview(getGQLClient, t)),
-		)
-	codeSecurity := toolsets.NewToolset("code_security", "Code security related tools, such as GitHub Code Scanning").
-		AddReadTools(
-			toolsets.NewServerTool(GetCodeScanningAlert(getClient, t)),
-			toolsets.NewServerTool(ListCodeScanningAlerts(getClient, t)),
-		)
-	secretProtection := toolsets.NewToolset("secret_protection", "Secret protection related tools, such as GitHub Secret Scanning").
-		AddReadTools(
-			toolsets.NewServerTool(GetSecretScanningAlert(getClient, t)),
-			toolsets.NewServerTool(ListSecretScanningAlerts(getClient, t)),
-		)
-	// Keep experiments alive so the system doesn't error out when it's always enabled
-	experiments := toolsets.NewToolset("experiments", "Experimental features that are not considered stable yet")
-
-	// Add toolsets to the group
-	tsg.AddToolset(repos)
-	tsg.AddToolset(issues)
-	tsg.AddToolset(users)
-	tsg.AddToolset(pullRequests)
-	tsg.AddToolset(codeSecurity)
-	tsg.AddToolset(secretProtection)
-	tsg.AddToolset(experiments)
-	// Enable the requested features
-
-	if err := tsg.EnableToolsets(passedToolsets); err != nil {
-		return nil, err
+// Toolset metadata constants - these define all available toolsets and their descriptions.
+// Tools use these constants to declare which toolset they belong to.
+// Icons are Octicon names from https://primer.style/foundations/icons
+var (
+	ToolsetMetadataAll = inventory.ToolsetMetadata{
+		ID:          "all",
+		Description: "Special toolset that enables all available toolsets",
+		Icon:        "apps",
+	}
+	ToolsetMetadataDefault = inventory.ToolsetMetadata{
+		ID:          "default",
+		Description: "Special toolset that enables the default toolset configuration. When no toolsets are specified, this is the set that is enabled",
+		Icon:        "check-circle",
+	}
+	ToolsetMetadataContext = inventory.ToolsetMetadata{
+		ID:               "context",
+		Description:      "Tools that provide context about the current user and GitHub context you are operating in",
+		Default:          true,
+		Icon:             "person",
+		InstructionsFunc: generateContextToolsetInstructions,
+	}
+	ToolsetMetadataRepos = inventory.ToolsetMetadata{
+		ID:          "repos",
+		Description: "GitHub Repository related tools",
+		Default:     true,
+		Icon:        "repo",
+	}
+	ToolsetMetadataGit = inventory.ToolsetMetadata{
+		ID:          "git",
+		Description: "GitHub Git API related tools for low-level Git operations",
+		Icon:        "git-branch",
+	}
+	ToolsetMetadataIssues = inventory.ToolsetMetadata{
+		ID:               "issues",
+		Description:      "GitHub Issues related tools",
+		Default:          true,
+		Icon:             "issue-opened",
+		InstructionsFunc: generateIssuesToolsetInstructions,
+	}
+	ToolsetMetadataPullRequests = inventory.ToolsetMetadata{
+		ID:               "pull_requests",
+		Description:      "GitHub Pull Request related tools",
+		Default:          true,
+		Icon:             "git-pull-request",
+		InstructionsFunc: generatePullRequestsToolsetInstructions,
+	}
+	ToolsetMetadataUsers = inventory.ToolsetMetadata{
+		ID:          "users",
+		Description: "GitHub User related tools",
+		Default:     true,
+		Icon:        "people",
+	}
+	ToolsetMetadataOrgs = inventory.ToolsetMetadata{
+		ID:          "orgs",
+		Description: "GitHub Organization related tools",
+		Icon:        "organization",
+	}
+	ToolsetMetadataActions = inventory.ToolsetMetadata{
+		ID:          "actions",
+		Description: "GitHub Actions workflows and CI/CD operations",
+		Icon:        "workflow",
+	}
+	ToolsetMetadataCodeSecurity = inventory.ToolsetMetadata{
+		ID:          "code_security",
+		Description: "Code security related tools, such as GitHub Code Scanning",
+		Icon:        "codescan",
+	}
+	ToolsetMetadataSecretProtection = inventory.ToolsetMetadata{
+		ID:          "secret_protection",
+		Description: "Secret protection related tools, such as GitHub Secret Scanning",
+		Icon:        "shield-lock",
+	}
+	ToolsetMetadataDependabot = inventory.ToolsetMetadata{
+		ID:          "dependabot",
+		Description: "Dependabot tools",
+		Icon:        "dependabot",
+	}
+	ToolsetMetadataNotifications = inventory.ToolsetMetadata{
+		ID:          "notifications",
+		Description: "GitHub Notifications related tools",
+		Icon:        "bell",
+	}
+	ToolsetMetadataDiscussions = inventory.ToolsetMetadata{
+		ID:               "discussions",
+		Description:      "GitHub Discussions related tools",
+		Icon:             "comment-discussion",
+		InstructionsFunc: generateDiscussionsToolsetInstructions,
+	}
+	ToolsetMetadataGists = inventory.ToolsetMetadata{
+		ID:          "gists",
+		Description: "GitHub Gist related tools",
+		Icon:        "logo-gist",
+	}
+	ToolsetMetadataSecurityAdvisories = inventory.ToolsetMetadata{
+		ID:          "security_advisories",
+		Description: "Security advisories related tools",
+		Icon:        "shield",
+	}
+	ToolsetMetadataProjects = inventory.ToolsetMetadata{
+		ID:               "projects",
+		Description:      "GitHub Projects related tools",
+		Icon:             "project",
+		InstructionsFunc: generateProjectsToolsetInstructions,
+	}
+	ToolsetMetadataStargazers = inventory.ToolsetMetadata{
+		ID:          "stargazers",
+		Description: "GitHub Stargazers related tools",
+		Icon:        "star",
+	}
+	ToolsetMetadataDynamic = inventory.ToolsetMetadata{
+		ID:          "dynamic",
+		Description: "Discover GitHub MCP tools that can help achieve tasks by enabling additional sets of tools, you can control the enablement of any toolset to access its tools when this toolset is enabled.",
+		Icon:        "tools",
+	}
+	ToolsetLabels = inventory.ToolsetMetadata{
+		ID:          "labels",
+		Description: "GitHub Labels related tools",
+		Icon:        "tag",
 	}
 
-	return tsg, nil
+	ToolsetMetadataCopilot = inventory.ToolsetMetadata{
+		ID:          "copilot",
+		Description: "Copilot related tools",
+		Default:     true,
+		Icon:        "copilot",
+	}
+
+	// Remote-only toolsets - these are only available in the remote MCP server
+	// but are documented here for consistency and to enable automated documentation.
+	ToolsetMetadataCopilotSpaces = inventory.ToolsetMetadata{
+		ID:          "copilot_spaces",
+		Description: "Copilot Spaces tools",
+		Icon:        "copilot",
+	}
+	ToolsetMetadataSupportSearch = inventory.ToolsetMetadata{
+		ID:          "github_support_docs_search",
+		Description: "Retrieve documentation to answer GitHub product and support questions. Topics include: GitHub Actions Workflows, Authentication, ...",
+		Icon:        "book",
+	}
+)
+
+// AllTools returns all tools with their embedded toolset metadata.
+// Tool functions return ServerTool directly with toolset info.
+func AllTools(t translations.TranslationHelperFunc) []inventory.ServerTool {
+	return []inventory.ServerTool{
+		// Context tools
+		GetMe(t),
+		GetTeams(t),
+		GetTeamMembers(t),
+
+		// Repository tools
+		SearchRepositories(t),
+		GetFileContents(t),
+		ListCommits(t),
+		SearchCode(t),
+		GetCommit(t),
+		ListBranches(t),
+		ListTags(t),
+		GetTag(t),
+		ListReleases(t),
+		GetLatestRelease(t),
+		GetReleaseByTag(t),
+		CreateOrUpdateFile(t),
+		CreateRepository(t),
+		ForkRepository(t),
+		CreateBranch(t),
+		PushFiles(t),
+		DeleteFile(t),
+		ListStarredRepositories(t),
+		StarRepository(t),
+		UnstarRepository(t),
+
+		// Git tools
+		GetRepositoryTree(t),
+
+		// Issue tools
+		IssueRead(t),
+		SearchIssues(t),
+		ListIssues(t),
+		ListIssueTypes(t),
+		IssueWrite(t),
+		AddIssueComment(t),
+		SubIssueWrite(t),
+
+		// User tools
+		SearchUsers(t),
+
+		// Organization tools
+		SearchOrgs(t),
+
+		// Pull request tools
+		PullRequestRead(t),
+		ListPullRequests(t),
+		SearchPullRequests(t),
+		MergePullRequest(t),
+		UpdatePullRequestBranch(t),
+		CreatePullRequest(t),
+		UpdatePullRequest(t),
+		PullRequestReviewWrite(t),
+		AddCommentToPendingReview(t),
+		AddReplyToPullRequestComment(t),
+
+		// Copilot tools
+		AssignCopilotToIssue(t),
+		RequestCopilotReview(t),
+
+		// Code security tools
+		GetCodeScanningAlert(t),
+		ListCodeScanningAlerts(t),
+
+		// Secret protection tools
+		GetSecretScanningAlert(t),
+		ListSecretScanningAlerts(t),
+
+		// Dependabot tools
+		GetDependabotAlert(t),
+		ListDependabotAlerts(t),
+
+		// Notification tools
+		ListNotifications(t),
+		GetNotificationDetails(t),
+		DismissNotification(t),
+		MarkAllNotificationsRead(t),
+		ManageNotificationSubscription(t),
+		ManageRepositoryNotificationSubscription(t),
+
+		// Discussion tools
+		ListDiscussions(t),
+		GetDiscussion(t),
+		GetDiscussionComments(t),
+		ListDiscussionCategories(t),
+
+		// Actions tools
+		ActionsList(t),
+		ActionsGet(t),
+		ActionsRunTrigger(t),
+		ActionsGetJobLogs(t),
+
+		// Security advisories tools
+		ListGlobalSecurityAdvisories(t),
+		GetGlobalSecurityAdvisory(t),
+		ListRepositorySecurityAdvisories(t),
+		ListOrgRepositorySecurityAdvisories(t),
+
+		// Gist tools
+		ListGists(t),
+		GetGist(t),
+		CreateGist(t),
+		UpdateGist(t),
+
+		// Project tools
+		ProjectsList(t),
+		ProjectsGet(t),
+		ProjectsWrite(t),
+
+		// Label tools
+		GetLabel(t),
+		GetLabelForLabelsToolset(t),
+		ListLabels(t),
+		LabelWrite(t),
+	}
 }
 
-func InitContextToolset(getClient GetClientFn, t translations.TranslationHelperFunc) *toolsets.Toolset {
-	// Create a new context toolset
-	contextTools := toolsets.NewToolset("context", "Tools that provide context about the current user and GitHub context you are operating in").
-		AddReadTools(
-			toolsets.NewServerTool(GetMe(getClient, t)),
-		)
-	contextTools.Enabled = true
-	return contextTools
-}
-
-// InitDynamicToolset creates a dynamic toolset that can be used to enable other toolsets, and so requires the server and toolset group as arguments
-func InitDynamicToolset(s *server.MCPServer, tsg *toolsets.ToolsetGroup, t translations.TranslationHelperFunc) *toolsets.Toolset {
-	// Create a new dynamic toolset
-	// Need to add the dynamic toolset last so it can be used to enable other toolsets
-	dynamicToolSelection := toolsets.NewToolset("dynamic", "Discover GitHub MCP tools that can help achieve tasks by enabling additional sets of tools, you can control the enablement of any toolset to access its tools when this toolset is enabled.").
-		AddReadTools(
-			toolsets.NewServerTool(ListAvailableToolsets(tsg, t)),
-			toolsets.NewServerTool(GetToolsetsTools(tsg, t)),
-			toolsets.NewServerTool(EnableToolset(s, tsg, t)),
-		)
-
-	dynamicToolSelection.Enabled = true
-	return dynamicToolSelection
-}
-
-func toBoolPtr(b bool) *bool {
+// ToBoolPtr converts a bool to a *bool pointer.
+func ToBoolPtr(b bool) *bool {
 	return &b
+}
+
+// ToStringPtr converts a string to a *string pointer.
+// Returns nil if the string is empty.
+func ToStringPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// GenerateToolsetsHelp generates the help text for the toolsets flag
+func GenerateToolsetsHelp() string {
+	// Get toolset group to derive defaults and available toolsets
+	// Build() can only fail if WithTools specifies invalid tools - not used here
+	r, _ := NewInventory(stubTranslator).Build()
+
+	// Format default tools from metadata using strings.Builder
+	var defaultBuf strings.Builder
+	defaultIDs := r.DefaultToolsetIDs()
+	for i, id := range defaultIDs {
+		if i > 0 {
+			defaultBuf.WriteString(", ")
+		}
+		defaultBuf.WriteString(string(id))
+	}
+
+	// Get all available toolsets (excludes context and dynamic for display)
+	allToolsets := r.AvailableToolsets("context", "dynamic")
+	var availableBuf strings.Builder
+	const maxLineLength = 70
+	currentLine := ""
+
+	for i, toolset := range allToolsets {
+		id := string(toolset.ID)
+		switch {
+		case i == 0:
+			currentLine = id
+		case len(currentLine)+len(id)+2 <= maxLineLength:
+			currentLine += ", " + id
+		default:
+			if availableBuf.Len() > 0 {
+				availableBuf.WriteString(",\n\t     ")
+			}
+			availableBuf.WriteString(currentLine)
+			currentLine = id
+		}
+	}
+	if currentLine != "" {
+		if availableBuf.Len() > 0 {
+			availableBuf.WriteString(",\n\t     ")
+		}
+		availableBuf.WriteString(currentLine)
+	}
+
+	// Build the complete help text using strings.Builder
+	var buf strings.Builder
+	buf.WriteString("Comma-separated list of tool groups to enable (no spaces).\n")
+	buf.WriteString("Available: ")
+	buf.WriteString(availableBuf.String())
+	buf.WriteString("\n")
+	buf.WriteString("Special toolset keywords:\n")
+	buf.WriteString("  - all: Enables all available toolsets\n")
+	buf.WriteString("  - default: Enables the default toolset configuration of:\n\t     ")
+	buf.WriteString(defaultBuf.String())
+	buf.WriteString("\n")
+	buf.WriteString("Examples:\n")
+	buf.WriteString("  - --toolsets=actions,gists,notifications\n")
+	buf.WriteString("  - Default + additional: --toolsets=default,actions,gists\n")
+	buf.WriteString("  - All tools: --toolsets=all")
+
+	return buf.String()
+}
+
+// stubTranslator is a passthrough translator for cases where we need an Inventory
+// but don't need actual translations (e.g., getting toolset IDs for CLI help).
+func stubTranslator(_, fallback string) string { return fallback }
+
+// AddDefaultToolset removes the default toolset and expands it to the actual default toolset IDs
+func AddDefaultToolset(result []string) []string {
+	hasDefault := false
+	seen := make(map[string]bool)
+	for _, toolset := range result {
+		seen[toolset] = true
+		if toolset == string(ToolsetMetadataDefault.ID) {
+			hasDefault = true
+		}
+	}
+
+	// Only expand if "default" keyword was found
+	if !hasDefault {
+		return result
+	}
+
+	result = RemoveToolset(result, string(ToolsetMetadataDefault.ID))
+
+	// Get default toolset IDs from the Inventory
+	// Build() can only fail if WithTools specifies invalid tools - not used here
+	r, _ := NewInventory(stubTranslator).Build()
+	for _, id := range r.DefaultToolsetIDs() {
+		if !seen[string(id)] {
+			result = append(result, string(id))
+		}
+	}
+	return result
+}
+
+func RemoveToolset(tools []string, toRemove string) []string {
+	result := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool != toRemove {
+			result = append(result, tool)
+		}
+	}
+	return result
+}
+
+func ContainsToolset(tools []string, toCheck string) bool {
+	return slices.Contains(tools, toCheck)
+}
+
+// CleanTools cleans tool names by removing duplicates and trimming whitespace.
+// Validation of tool existence is done during registration.
+func CleanTools(toolNames []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(toolNames))
+
+	// Remove duplicates and trim whitespace
+	for _, tool := range toolNames {
+		trimmed := strings.TrimSpace(tool)
+		if trimmed == "" {
+			continue
+		}
+		if !seen[trimmed] {
+			seen[trimmed] = true
+			result = append(result, trimmed)
+		}
+	}
+
+	return result
+}
+
+// GetDefaultToolsetIDs returns the IDs of toolsets marked as Default.
+// This is a convenience function that builds an inventory to determine defaults.
+func GetDefaultToolsetIDs() []string {
+	// Build() can only fail if WithTools specifies invalid tools - not used here
+	r, _ := NewInventory(stubTranslator).Build()
+	ids := r.DefaultToolsetIDs()
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = string(id)
+	}
+	return result
+}
+
+// AllToolsetIDs returns the IDs of all registered toolsets.
+// Used by ParseToolsetModes to expand "all:ro" to all toolset IDs.
+// This builds a temporary inventory — it is a one-time cost at startup.
+func AllToolsetIDs() []inventory.ToolsetID {
+	// Build() should never fail here: no tools are set, so no unrecognized
+	// tools are possible. Panic on error to surface unexpected regressions.
+	inv, err := NewInventory(stubTranslator).Build()
+	if err != nil {
+		panic(fmt.Sprintf("AllToolsetIDs: unexpected Build() error: %v", err))
+	}
+	return inv.ToolsetIDs()
+}
+
+// ParseToolsetModes parses toolset config strings like "repos:rw,issues:ro,users".
+// Returns:
+//   - toolsetNames: just the names (for WithToolsets); "all" is preserved as-is
+//   - readOnlyToolsets: map of ToolsetID → true for toolsets configured as read-only
+//
+// Supported mode suffixes (case-insensitive):
+//   - ":ro" or ":readonly" → read-only for this toolset
+//   - ":rw" or ":readwrite" → read-write (explicitly removes prior :ro)
+//   - No suffix → read-write (default)
+//   - Unknown suffix → treated as part of the name (backwards compatibility)
+//
+// Special case: "all:ro" marks every toolset ID in allKnownToolsets as read-only.
+// Pass nil for allKnownToolsets if not yet known (deferred expansion).
+//
+// Order matters: entries are processed left-to-right. "all:ro,repos:rw" makes
+// everything read-only except repos. The reverse "repos:rw,all:ro" makes repos
+// read-only because all:ro runs after the rw delete. Use "all:ro,<name>:rw" to
+// express exceptions.
+func ParseToolsetModes(configs []string, allKnownToolsets []inventory.ToolsetID) (toolsetNames []string, readOnlyToolsets map[inventory.ToolsetID]bool) {
+	// Preserve nil semantics: nil input means "use defaults" in WithToolsets.
+	// An empty non-nil slice means "enable none" — different behavior.
+	if configs == nil {
+		return nil, nil
+	}
+	readOnlyToolsets = make(map[inventory.ToolsetID]bool)
+	toolsetNames = make([]string, 0, len(configs))
+
+	for _, config := range configs {
+		config = strings.TrimSpace(config)
+		if config == "" {
+			continue
+		}
+
+		name := config
+		isReadOnly := false
+
+		if idx := strings.LastIndex(config, ":"); idx > 0 {
+			candidate := config[:idx]
+			mode := strings.ToLower(config[idx+1:])
+			switch mode {
+			case "ro", "readonly":
+				name = candidate
+				isReadOnly = true
+			case "rw", "readwrite":
+				name = candidate
+				// default, no-op
+			default:
+				// Unknown mode — treat entire string as name (backwards compat)
+				name = config
+			}
+		}
+
+		toolsetNames = append(toolsetNames, name)
+
+		if isReadOnly {
+			if name == "all" {
+				// Expand "all:ro" to every known toolset ID
+				for _, id := range allKnownToolsets {
+					readOnlyToolsets[id] = true
+				}
+			} else {
+				readOnlyToolsets[inventory.ToolsetID(name)] = true
+			}
+		} else {
+			// Explicit :rw removes a prior :ro entry (supports "all:ro,repos:rw"
+			// to make everything read-only except repos).
+			delete(readOnlyToolsets, inventory.ToolsetID(name))
+		}
+	}
+
+	return toolsetNames, readOnlyToolsets
+}
+
+// RemoteOnlyToolsets returns toolset metadata for toolsets that are only
+// available in the remote MCP server. These are documented but not registered
+// in the local server.
+func RemoteOnlyToolsets() []inventory.ToolsetMetadata {
+	return []inventory.ToolsetMetadata{
+		ToolsetMetadataCopilotSpaces,
+		ToolsetMetadataSupportSearch,
+	}
 }

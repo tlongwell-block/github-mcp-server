@@ -15,6 +15,26 @@ be executed against the configured MCP server.
 
 ## Installation
 
+### Prerequisites
+- Go 1.24 or later
+- Access to the GitHub MCP Server from either Docker or local build
+
+### Build from Source
+```bash
+cd cmd/mcpcurl
+go build -o mcpcurl
+```
+
+### Using Go Install
+```bash
+go install github.com/github/github-mcp-server/cmd/mcpcurl@latest
+```
+
+### Verify Installation
+```bash
+./mcpcurl --help
+```
+
 ## Usage
 
 ```console
@@ -31,7 +51,7 @@ The `--stdio-server-cmd` flag is required for all commands and specifies the com
 
 ### Examples
 
-List available tools in Anthropic's MCP server:
+List available tools in Github's MCP server:
 
 ```console
 % ./mcpcurl --stdio-server-cmd "docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN mcp/github" tools --help

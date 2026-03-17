@@ -1,0 +1,568 @@
+package github
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/google/go-github/v82/github"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestRepositoryResourceCompletionHandler(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  *mcp.CompleteRequest
+		expected *mcp.CompleteResult
+		wantErr  bool
+	}{
+		{
+			name: "non-resource completion request",
+			request: &mcp.CompleteRequest{
+				Params: &mcp.CompleteParams{
+					Ref: &mcp.CompleteReference{
+						Type: "something-else",
+					},
+				},
+			},
+			expected: nil,
+			wantErr:  false,
+		},
+		{
+			name: "invalid ref type",
+			request: &mcp.CompleteRequest{
+				Params: &mcp.CompleteParams{
+					Ref: &mcp.CompleteReference{
+						Type: "invalid-ref",
+					},
+				},
+			},
+			expected: nil,
+			wantErr:  false,
+		},
+		{
+			name: "unknown argument",
+			request: &mcp.CompleteRequest{
+				Params: &mcp.CompleteParams{
+					Ref: &mcp.CompleteReference{
+						Type: "ref/resource",
+					},
+					Context: &mcp.CompleteContext{},
+					Argument: mcp.CompleteParamsArgument{
+						Name:  "unknown_arg",
+						Value: "test",
+					},
+				},
+			},
+			expected: nil,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getClient := func(_ context.Context) (*github.Client, error) {
+				return &github.Client{}, nil
+			}
+
+			handler := RepositoryResourceCompletionHandler(getClient, nil)
+			result, err := handler(t.Context(), tt.request)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestRepositoryResourceCompletionHandler_GetClientError(t *testing.T) {
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return nil, errors.New("client error")
+	}
+
+	handler := RepositoryResourceCompletionHandler(getClient, nil)
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{
+				Type: "ref/resource",
+			},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{
+					"owner": "test",
+				},
+			},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "owner",
+				Value: "test",
+			},
+		},
+	}
+
+	result, err := handler(t.Context(), request)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "client error")
+}
+
+// Test the logical behavior of complete functions with missing dependencies
+func TestCompleteRepo_MissingOwner(t *testing.T) {
+	ctx := t.Context()
+	resolved := map[string]string{} // No owner
+	argValue := "test"
+
+	result, err := completeRepo(ctx, nil, resolved, argValue)
+	require.Error(t, err)
+	assert.Nil(t, result) // Should return nil slice when owner is missing
+}
+
+func TestCompleteBranch_MissingDependencies(t *testing.T) {
+	ctx := t.Context()
+
+	// Test missing owner
+	resolved := map[string]string{"repo": "testrepo"}
+	result, err := completeBranch(ctx, nil, resolved, "main")
+	require.Error(t, err)
+	assert.Nil(t, result) // Returns nil slice when dependencies are missing
+
+	// Test missing repo
+	resolved = map[string]string{"owner": "testowner"}
+	result, err = completeBranch(ctx, nil, resolved, "main")
+	require.Error(t, err)
+	assert.Nil(t, result) // Returns nil slice when dependencies are missing
+}
+
+func TestCompleteSHA_MissingDependencies(t *testing.T) {
+	ctx := t.Context()
+
+	// Test missing owner
+	resolved := map[string]string{"repo": "testrepo"}
+	result, err := completeSHA(ctx, nil, resolved, "abc123")
+	require.Error(t, err)
+	assert.Nil(t, result) // Returns nil slice when dependencies are missing
+
+	// Test missing repo
+	resolved = map[string]string{"owner": "testowner"}
+	result, err = completeSHA(ctx, nil, resolved, "abc123")
+	require.Error(t, err)
+	assert.Nil(t, result) // Returns nil slice when dependencies are missing
+}
+
+func TestCompleteTag_MissingDependencies(t *testing.T) {
+	ctx := t.Context()
+
+	// Test missing owner
+	resolved := map[string]string{"repo": "testrepo"}
+	result, err := completeTag(ctx, nil, resolved, "v1.0")
+	require.Error(t, err)
+	assert.Nil(t, result) // completeTag returns nil for missing dependencies
+
+	// Test missing repo
+	resolved = map[string]string{"owner": "testowner"}
+	result, err = completeTag(ctx, nil, resolved, "v1.0")
+	require.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestCompletePRNumber_MissingDependencies(t *testing.T) {
+	ctx := t.Context()
+
+	// Test missing owner
+	resolved := map[string]string{"repo": "testrepo"}
+	result, err := completePRNumber(ctx, nil, resolved, "1")
+	require.Error(t, err)
+	assert.Nil(t, result) // Returns nil slice when dependencies are missing
+
+	// Test missing repo
+	resolved = map[string]string{"owner": "testowner"}
+	result, err = completePRNumber(ctx, nil, resolved, "1")
+	require.Error(t, err)
+	assert.Nil(t, result) // Returns nil slice when dependencies are missing
+}
+
+func TestCompletePath_MissingDependencies(t *testing.T) {
+	ctx := t.Context()
+
+	// Test missing owner
+	resolved := map[string]string{"repo": "testrepo"}
+	result, err := completePath(ctx, nil, resolved, "src/")
+	require.Error(t, err)
+	assert.Nil(t, result) // completePath returns nil for missing dependencies
+
+	// Test missing repo
+	resolved = map[string]string{"owner": "testowner"}
+	result, err = completePath(ctx, nil, resolved, "src/")
+	require.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestCompletePath_RefSelection(t *testing.T) {
+	// Test the logic for selecting the ref (branch, sha, tag, or HEAD)
+	// We test this by verifying the function handles different ref combinations
+	// without making API calls (since we can't mock them easily)
+
+	ctx := t.Context()
+
+	// Test that the function returns nil when dependencies are missing
+	resolved := map[string]string{
+		"owner": "",
+		"repo":  "",
+	}
+	result, err := completePath(ctx, nil, resolved, "src/")
+	require.Error(t, err)
+	assert.Nil(t, result)
+
+	// When owner is present but repo is missing
+	resolved = map[string]string{
+		"owner": "testowner",
+		"repo":  "",
+	}
+	result, err = completePath(ctx, nil, resolved, "src/")
+	require.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestRepositoryResourceArgumentResolvers_Existence(t *testing.T) {
+	// Test that all expected resolvers are present
+	expectedResolvers := []string{
+		"owner", "repo", "branch", "sha", "tag", "prNumber", "path",
+	}
+
+	for _, resolver := range expectedResolvers {
+		t.Run(fmt.Sprintf("resolver_%s_exists", resolver), func(t *testing.T) {
+			_, exists := RepositoryResourceArgumentResolvers[resolver]
+			assert.True(t, exists, "Resolver %s should exist", resolver)
+		})
+	}
+
+	// Verify the total count
+	assert.Len(t, RepositoryResourceArgumentResolvers, len(expectedResolvers))
+}
+
+func TestRepositoryResourceCompletionHandler_MaxResults(t *testing.T) {
+	// Test that results are limited to 100 items
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return &github.Client{}, nil
+	}
+
+	handler := RepositoryResourceCompletionHandler(getClient, nil)
+
+	// Mock a resolver that returns more than 100 results
+	originalResolver := RepositoryResourceArgumentResolvers["owner"]
+	RepositoryResourceArgumentResolvers["owner"] = func(_ context.Context, _ *github.Client, _ map[string]string, _ string) ([]string, error) {
+		// Return 150 results
+		results := make([]string, 150)
+		for i := range 150 {
+			results[i] = fmt.Sprintf("user%d", i)
+		}
+		return results, nil
+	}
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{
+				Type: "ref/resource",
+			},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{
+					"owner": "test",
+				},
+			},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "owner",
+				Value: "test",
+			},
+		},
+	}
+
+	result, err := handler(t.Context(), request)
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.LessOrEqual(t, len(result.Completion.Values), 100)
+
+	// Restore original resolver
+	RepositoryResourceArgumentResolvers["owner"] = originalResolver
+}
+
+func TestRepositoryResourceCompletionHandler_WithContext(t *testing.T) {
+	// Test that the handler properly passes resolved context arguments
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return &github.Client{}, nil
+	}
+
+	handler := RepositoryResourceCompletionHandler(getClient, nil)
+
+	// Mock a resolver that just returns the resolved arguments for testing
+	originalResolver := RepositoryResourceArgumentResolvers["repo"]
+	RepositoryResourceArgumentResolvers["repo"] = func(_ context.Context, _ *github.Client, resolved map[string]string, _ string) ([]string, error) {
+		if owner, exists := resolved["owner"]; exists {
+			return []string{fmt.Sprintf("repo-for-%s", owner)}, nil
+		}
+		return []string{}, nil
+	}
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{
+				Type: "ref/resource",
+			},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "repo",
+				Value: "test",
+			},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{
+					"owner": "testowner",
+				},
+			},
+		},
+	}
+
+	result, err := handler(t.Context(), request)
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Contains(t, result.Completion.Values, "repo-for-testowner")
+
+	// Restore original resolver
+	RepositoryResourceArgumentResolvers["repo"] = originalResolver
+}
+
+func TestRepositoryResourceCompletionHandler_NilContext(t *testing.T) {
+	// Test that the handler handles nil context gracefully
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return &github.Client{}, nil
+	}
+
+	handler := RepositoryResourceCompletionHandler(getClient, nil)
+
+	// Mock a resolver that checks for empty resolved map
+	originalResolver := RepositoryResourceArgumentResolvers["repo"]
+	RepositoryResourceArgumentResolvers["repo"] = func(_ context.Context, _ *github.Client, resolved map[string]string, _ string) ([]string, error) {
+		assert.NotNil(t, resolved, "Resolved map should never be nil")
+		return []string{"test-repo"}, nil
+	}
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{
+				Type: "ref/resource",
+			},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "repo",
+				Value: "test",
+			},
+			// Context is not set, so it should default to empty map
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{},
+			},
+		},
+	}
+
+	result, err := handler(t.Context(), request)
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+
+	// Restore original resolver
+	RepositoryResourceArgumentResolvers["repo"] = originalResolver
+}
+
+// --- Denylist enforcement tests ---
+
+func TestRepositoryResourceCompletionHandler_DenylistBlocksOrgWildcard(t *testing.T) {
+	getClient := func(_ context.Context) (*github.Client, error) {
+		t.Fatal("getClient should not be called for denied org")
+		return nil, nil
+	}
+	denylist := NewRepoDenylist([]string{"denied-org/*"})
+	handler := RepositoryResourceCompletionHandler(getClient, denylist)
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{Type: "ref/resource"},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "repo",
+				Value: "test",
+			},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{"owner": "denied-org"},
+			},
+		},
+	}
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Completion.Values,
+		"completions for denied org should return empty values")
+}
+
+func TestRepositoryResourceCompletionHandler_DenylistBlocksExactRepo(t *testing.T) {
+	getClient := func(_ context.Context) (*github.Client, error) {
+		t.Fatal("getClient should not be called for denied repo")
+		return nil, nil
+	}
+	denylist := NewRepoDenylist([]string{"my-org/secret-repo"})
+	handler := RepositoryResourceCompletionHandler(getClient, denylist)
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{Type: "ref/resource"},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "branch",
+				Value: "main",
+			},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{
+					"owner": "my-org",
+					"repo":  "secret-repo",
+				},
+			},
+		},
+	}
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Completion.Values,
+		"completions for denied repo should return empty values")
+}
+
+func TestRepositoryResourceCompletionHandler_DenylistAllowsNonDenied(t *testing.T) {
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return github.NewClient(nil), nil
+	}
+	denylist := NewRepoDenylist([]string{"denied-org/*"})
+	handler := RepositoryResourceCompletionHandler(getClient, denylist)
+
+	// Restore owner resolver after test
+	originalResolver := RepositoryResourceArgumentResolvers["owner"]
+	RepositoryResourceArgumentResolvers["owner"] = func(_ context.Context, _ *github.Client, _ map[string]string, _ string) ([]string, error) {
+		return []string{"allowed-org"}, nil
+	}
+	defer func() { RepositoryResourceArgumentResolvers["owner"] = originalResolver }()
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref: &mcp.CompleteReference{Type: "ref/resource"},
+			Argument: mcp.CompleteParamsArgument{
+				Name:  "owner",
+				Value: "allowed",
+			},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{},
+			},
+		},
+	}
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.NotEmpty(t, result.Completion.Values,
+		"completions for non-denied org should return values")
+}
+
+// --- Post-resolver denylist filtering tests ---
+
+func TestRepositoryResourceCompletionHandler_DenylistFiltersOwnerResults(t *testing.T) {
+	// Owner resolver returns a mix of allowed and denied orgs.
+	// The post-resolver filter should strip out denied-org from the results.
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return github.NewClient(nil), nil
+	}
+	denylist := NewRepoDenylist([]string{"denied-org/*"})
+	handler := RepositoryResourceCompletionHandler(getClient, denylist)
+
+	originalResolver := RepositoryResourceArgumentResolvers["owner"]
+	RepositoryResourceArgumentResolvers["owner"] = func(_ context.Context, _ *github.Client, _ map[string]string, _ string) ([]string, error) {
+		return []string{"allowed-org", "denied-org", "another-org"}, nil
+	}
+	defer func() { RepositoryResourceArgumentResolvers["owner"] = originalResolver }()
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref:      &mcp.CompleteReference{Type: "ref/resource"},
+			Argument: mcp.CompleteParamsArgument{Name: "owner", Value: ""},
+			Context:  &mcp.CompleteContext{Arguments: map[string]string{}},
+		},
+	}
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, result.Completion.Values, "allowed-org")
+	assert.Contains(t, result.Completion.Values, "another-org")
+	assert.NotContains(t, result.Completion.Values, "denied-org",
+		"denied-org should be filtered from owner completion results")
+}
+
+func TestRepositoryResourceCompletionHandler_DenylistFiltersRepoResults(t *testing.T) {
+	// Repo resolver returns a mix of allowed and denied repos.
+	// The post-resolver filter should strip out secret-repo from the results.
+	getClient := func(_ context.Context) (*github.Client, error) {
+		return github.NewClient(nil), nil
+	}
+	denylist := NewRepoDenylist([]string{"my-org/secret-repo"})
+	handler := RepositoryResourceCompletionHandler(getClient, denylist)
+
+	originalResolver := RepositoryResourceArgumentResolvers["repo"]
+	RepositoryResourceArgumentResolvers["repo"] = func(_ context.Context, _ *github.Client, _ map[string]string, _ string) ([]string, error) {
+		return []string{"public-repo", "secret-repo", "other-repo"}, nil
+	}
+	defer func() { RepositoryResourceArgumentResolvers["repo"] = originalResolver }()
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref:      &mcp.CompleteReference{Type: "ref/resource"},
+			Argument: mcp.CompleteParamsArgument{Name: "repo", Value: ""},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{"owner": "my-org"},
+			},
+		},
+	}
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, result.Completion.Values, "public-repo")
+	assert.Contains(t, result.Completion.Values, "other-repo")
+	assert.NotContains(t, result.Completion.Values, "secret-repo",
+		"secret-repo should be filtered from repo completion results")
+}
+
+func TestRepositoryResourceCompletionHandler_DenylistFiltersAllReposForDeniedOrg(t *testing.T) {
+	// When owner is a wildcard-denied org, the pre-resolver check returns empty early.
+	// This test verifies the end-to-end behavior: no repos leak for a fully denied org.
+	getClient := func(_ context.Context) (*github.Client, error) {
+		t.Fatal("getClient should not be called for denied org")
+		return nil, nil
+	}
+	denylist := NewRepoDenylist([]string{"denied-org/*"})
+	handler := RepositoryResourceCompletionHandler(getClient, denylist)
+
+	originalResolver := RepositoryResourceArgumentResolvers["repo"]
+	RepositoryResourceArgumentResolvers["repo"] = func(_ context.Context, _ *github.Client, _ map[string]string, _ string) ([]string, error) {
+		return []string{"repo-a", "repo-b"}, nil
+	}
+	defer func() { RepositoryResourceArgumentResolvers["repo"] = originalResolver }()
+
+	request := &mcp.CompleteRequest{
+		Params: &mcp.CompleteParams{
+			Ref:      &mcp.CompleteReference{Type: "ref/resource"},
+			Argument: mcp.CompleteParamsArgument{Name: "repo", Value: ""},
+			Context: &mcp.CompleteContext{
+				Arguments: map[string]string{"owner": "denied-org"},
+			},
+		},
+	}
+
+	result, err := handler(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Completion.Values,
+		"all repos for a wildcard-denied org should be filtered out")
+}
